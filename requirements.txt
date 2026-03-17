@@ -1,3 +1,11 @@
 pyyaml
 torch
 numpy
+crepe
+mir_eval
+scipy
+matplotlib
+tqdm
+librosa
+soundfile
+note_seq==0.0.5
