@@ -1,0 +1,41 @@
+seed: 42
+run_name: crepe_yolo_dummy_base
+output_root: outputs
+
+data:
+  train_manifest: data/manifests/train_manifest.json
+  val_manifest: data/manifests/val_manifest.json
+  data_root: .
+  sample_rate: 16000
+  input_num_samples: 16000
+  batch_size: 8
+  num_workers: 0
+  pin_memory: false
+
+model:
+  name: dummy_model
+  kwargs:
+    input_num_samples: 16000
+    hidden_dim: 256
+    output_dim: 128
+
+optim:
+  name: adam
+  lr: 0.001
+  weight_decay: 0.0001
+
+train:
+  epochs: 5
+  device: cuda
+  grad_clip: 1.0
+  validate_every: 1
+  save_every: 1
+
+loss:
+  name: mse
+  target_dim: 128
+
+decode:
+  mode: argmax
+  conf_threshold: 0.5
+  min_note_dur: 0.03
