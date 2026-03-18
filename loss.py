@@ -9,13 +9,11 @@ class MusicYOLOLoss(nn.Module):
         self.mse_loss = nn.MSELoss(reduction='none')
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
         
-        # Define extreme aspect ratio anchors for notes (Width, Height)
-        # Normalized to the grid size (e.g., width 0.1 = 10% of the audio length)
-        # Height is fixed to roughly 1 semitone (5 bins / 360 bins = 0.0138)
+        # TODO: Make sure to generalize, this is specific for the flute dataset from the analyze_anchors.py output
         self.register_buffer('anchors', torch.tensor([
-            [0.05, 0.0138], # Short note (e.g., 8th note)
-            [0.10, 0.0138], # Medium note (e.g., quarter note)
-            [0.30, 0.0138]  # Long note (e.g., whole note/sustained)
+            [0.0026, 0.0139],
+            [0.0062, 0.0139],
+            [0.0153, 0.0139],
         ]))
 
         # Loss weighting
