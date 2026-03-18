@@ -5,14 +5,25 @@ import torchvision
 import random
 
 def get_train_test_split(stems, test_size=0.2, seed=42):
-    """Deterministically splits stems into train and test sets."""
-    sorted_stems = sorted(stems) 
-    rng = random.Random(seed)
-    rng.shuffle(sorted_stems)
+    """Deterministically splits stems, ensuring augmented data stays in the train set."""
     
-    split_idx = int(len(sorted_stems) * (1 - test_size))
-    train_stems = sorted_stems[:split_idx]
-    test_stems = sorted_stems[split_idx:]
+    # 1. Filter out the augmented files
+    original_stems = [s for s in stems if '_aug_' not in s]
+    augmented_stems = [s for s in stems if '_aug_' in s]
+    
+    # 2. Run the exact same split logic on ONLY the original stems
+    sorted_originals = sorted(original_stems) 
+    rng = random.Random(seed)
+    rng.shuffle(sorted_originals)
+    
+    split_idx = int(len(sorted_originals) * (1 - test_size))
+    train_stems = sorted_originals[:split_idx]
+    test_stems = sorted_originals[split_idx:]
+    
+    # 3. Safely append all augmented stems to the training list
+    # (Since our augment.py script only augments the train split anyway, 
+    # we know these are safe to add here).
+    train_stems.extend(augmented_stems)
     
     return train_stems, test_stems
 
@@ -72,6 +83,10 @@ def music_yolo_collate_fn(batch):
 
 def decode_predictions(predictions, anchors, conf_threshold=0.5, nms_iou_threshold=0.4):
     """Decodes raw YOLO predictions, applies confidence thresholding, and runs NMS."""
+
+    if isinstance(anchors, list):
+        anchors = torch.tensor(anchors, device=predictions.device, dtype=predictions.dtype)
+
     B, C, H, T = predictions.shape
     num_anchors = len(anchors)
     device = predictions.device
