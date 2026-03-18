@@ -1,0 +1,18 @@
+name: crepeyolo
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch
+      - torchvision
+      - tensorflow   # For Linux, this pulls the CUDA-enabled version automatically
+      - crepe
+      - mlflow
+      - librosa
+      - soundfile
+      - tqdm
+      - pandas
+      - mir_eval
