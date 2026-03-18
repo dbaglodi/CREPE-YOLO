@@ -1,6 +1,27 @@
-mlruns*
-checkpoints*
+# MLflow outputs
+mlruns/
+
+# Training artifacts
+outputs/
+checkpoints/
+logs/*.out
+logs/*.err
+
+# Data storage
+data/processed/
 GT-ITM-Flute-99*
-*__pycache__
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# IDE
 .DS_Store
-*processed
+.vscode/
+.idea/
+
+# Generated configs
+generated_sweeps/

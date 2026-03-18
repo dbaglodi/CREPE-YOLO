@@ -1,10 +1,18 @@
 # evaluate.py
 import os
+import sys
 import json
+from pathlib import Path
+
 import torch
 import numpy as np
 import mir_eval
 from tqdm import tqdm
+
+# Add training directory to path for local imports
+TRAINING_DIR = Path(__file__).resolve().parent
+if str(TRAINING_DIR) not in sys.path:
+    sys.path.insert(0, str(TRAINING_DIR))
 
 from dataset import MusicNoteDataset
 from model import DualStreamMusicYOLO

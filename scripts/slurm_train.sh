@@ -1,10 +1,9 @@
 #!/bin/bash
-#SBATCH -J crepe_yolo
+#SBATCH -J crepe_precompute
 #SBATCH -N 1
-#SBATCH --gres=gpu:1
-#SBATCH --mem=100GB
+#SBATCH --mem=16GB
 #SBATCH --cpus-per-task=4
-#SBATCH -t 08:00:00
+#SBATCH -t 04:00:00
 #SBATCH -o logs/%x_%j.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=lalexeyev3@gatech.edu
@@ -30,4 +29,5 @@ echo ""
 
 cd /storage/ice1/1/5/lalexeyev3/CREPE-YOLO
 
+python training/precompute_features.py
 #python scripts/run_train.py --config configs/base.yaml

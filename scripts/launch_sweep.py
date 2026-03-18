@@ -13,6 +13,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from training.utils import load_yaml, save_yaml
 
 
+def resolve_config_path(config_path: str) -> str:
+    """Resolve config path relative to PROJECT_ROOT if it's relative."""
+    p = Path(config_path)
+    if p.is_absolute():
+        return str(p)
+    return str(PROJECT_ROOT / config_path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-config", type=str, required=True)
@@ -23,23 +31,29 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    base_cfg = load_yaml(args.base_config)
+    config_path = resolve_config_path(args.base_config)
+    base_cfg = load_yaml(config_path)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Small starter sweep; expand later.
-    learning_rates = [1e-3, 3e-4]
-    batch_sizes = [4, 8]
-    weight_decays = [0.0, 1e-4]
+    # Expanded hyperparameter sweep for thorough tuning
+    learning_rates = [1e-3, 5e-4, 3e-4]          # 3 LR values
+    batch_sizes = [4, 8, 16]                      # 3 batch sizes
+    weight_decays = [0.0, 5e-5, 1e-4]            # 3 weight decay values
+    grad_clips = [3.0, 5.0]                       # 2 gradient clipping values
+    
+    # Total combinations: 3 * 3 * 3 * 2 = 54 configs
+    # (can reduce by uncommenting fewer values if needed)
 
     generated = []
 
-    for lr, bs, wd in itertools.product(learning_rates, batch_sizes, weight_decays):
+    for lr, bs, wd, gc in itertools.product(learning_rates, batch_sizes, weight_decays, grad_clips):
         cfg = load_yaml(args.base_config)
         cfg["optim"]["lr"] = lr
         cfg["optim"]["weight_decay"] = wd
         cfg["data"]["batch_size"] = bs
-        cfg["run_name"] = f"sweep_lr{lr}_bs{bs}_wd{wd}".replace(".", "p")
+        cfg["train"]["grad_clip"] = gc
+        cfg["run_name"] = f"sweep_lr{lr}_bs{bs}_wd{wd}_gc{gc}".replace(".", "p")
 
         config_path = out_dir / f"{cfg['run_name']}.yaml"
         save_yaml(config_path, cfg)

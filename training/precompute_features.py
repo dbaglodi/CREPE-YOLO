@@ -12,7 +12,7 @@ def run_pytorch_conversion():
     import numpy as np
     from tqdm import tqdm
     
-    processed_dir = Path('./processed/itm_flute')
+    processed_dir = Path('./data/processed/itm_flute')
     stems = [d.name for d in processed_dir.iterdir() if d.is_dir()]
     
     downsample_factor = 32
@@ -139,7 +139,7 @@ class CREPEFeatureExtractor:
         }
 
 def main():
-    processed_dir = Path('./processed/itm_flute')
+    processed_dir = Path('./data/processed/itm_flute')
     
     if not processed_dir.exists():
         raise FileNotFoundError(f"Directory {processed_dir} not found.")

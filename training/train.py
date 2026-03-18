@@ -1,187 +1,227 @@
-from __future__ import annotations
-
+# train.py
+import os
+import sys
 from pathlib import Path
-from typing import Any, Dict
 
 import torch
+import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+import mlflow
 
-from data.datasets import ManifestAudioDataset
-from models.registry import MODEL_REGISTRY
-from training.checkpointing import save_checkpoint
-from training.losses import compute_loss
-from training.metrics import batch_dummy_score, summarize_validation
-from training.utils import append_csv_row, ensure_dir, save_json
+# Add training directory to path for local imports
+TRAINING_DIR = Path(__file__).resolve().parent
+if str(TRAINING_DIR) not in sys.path:
+    sys.path.insert(0, str(TRAINING_DIR))
+
+from dataset import MusicNoteDataset
+from model import DualStreamMusicYOLO
+from loss import MusicYOLOLoss
+from utils import music_yolo_collate_fn, get_train_test_split
 
 
-def build_dataloaders(cfg: dict) -> tuple[DataLoader, DataLoader]:
-    data_cfg = cfg["data"]
-    target_dim = cfg["loss"]["target_dim"]
+def run_training(cfg: dict) -> dict:
+    """
+    Main training function that accepts a config dictionary.
+    
+    Args:
+        cfg: Configuration dict with keys:
+            - seed: Random seed
+            - run_name: Name for this run
+            - output_root: Root directory for outputs
+            - data: dict with processed_dir, batch_size, num_workers
+            - model: dict with num_anchors
+            - optim: dict with lr, weight_decay, name
+            - train: dict with epochs, device, grad_clip, save_every
+            - mlflow: dict with tracking_uri, experiment_name
+    
+    Returns:
+        Summary dict with training results
+    """
+    # --- 1. Setup Device ---
+    device_str = cfg.get("train", {}).get("device", "cuda")
+    device = torch.device(device_str if torch.cuda.is_available() else 'cpu')
+    print(f"--- Starting Training on device: {device} ---")
+    print(f"--- Run Name: {cfg.get('run_name', 'unnamed')} ---")
 
-    train_ds = ManifestAudioDataset(
-        manifest_path=data_cfg["train_manifest"],
-        data_root=data_cfg["data_root"],
-        input_num_samples=data_cfg["input_num_samples"],
-        target_dim=target_dim,
+    # --- 2. Extract Configuration ---
+    seed = cfg.get("seed", 42)
+    run_name = cfg.get("run_name", "default_run")
+    output_root = cfg.get("output_root", "outputs")
+    
+    # Data config
+    processed_dir = cfg["data"]["processed_dir"]
+    batch_size = cfg["data"]["batch_size"]
+    num_workers = cfg["data"].get("num_workers", 0)
+    test_size = cfg["data"].get("test_size", 0.2)
+    
+    # Model config
+    num_anchors = cfg["model"].get("num_anchors", 3)
+    
+    # Optimizer config
+    learning_rate = cfg["optim"]["lr"]
+    weight_decay = cfg["optim"].get("weight_decay", 0.0)
+    
+    # Training config
+    num_epochs = cfg["train"]["epochs"]
+    grad_clip = cfg["train"].get("grad_clip", 5.0)
+    save_every = cfg["train"].get("save_every", 10)
+    
+    # MLflow config
+    mlflow_cfg = cfg.get("mlflow", {})
+    mlflow_uri = mlflow_cfg.get("tracking_uri", "file:./mlruns")
+    mlflow_exp = mlflow_cfg.get("experiment_name", "CREPE-YOLO-Transcription")
+
+    # --- 3. Setup Output Directories ---
+    run_dir = Path(output_root) / run_name
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- 4. Setup MLflow ---
+    mlflow.set_tracking_uri(mlflow_uri)
+    mlflow.set_experiment(mlflow_exp)
+
+    # --- 5. Verify Dataset ---
+    if not os.path.exists(processed_dir):
+        raise FileNotFoundError(f"Processed directory not found: {processed_dir}")
+    
+    all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
+    if not all_stems:
+        raise ValueError(f"No dataset stems found in {processed_dir}")
+    
+    train_stems, test_stems = get_train_test_split(all_stems, test_size=test_size, seed=seed)
+    print(f"Dataset Split: {len(train_stems)} Training | {len(test_stems)} Validation")
+
+    # --- 6. Initialize Dataset and DataLoader ---
+    dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        collate_fn=music_yolo_collate_fn,
+        num_workers=num_workers
     )
-    val_ds = ManifestAudioDataset(
-        manifest_path=data_cfg["val_manifest"],
-        data_root=data_cfg["data_root"],
-        input_num_samples=data_cfg["input_num_samples"],
-        target_dim=target_dim,
-    )
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=data_cfg["batch_size"],
-        shuffle=True,
-        num_workers=data_cfg["num_workers"],
-        pin_memory=bool(data_cfg["pin_memory"]),
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=data_cfg["batch_size"],
-        shuffle=False,
-        num_workers=data_cfg["num_workers"],
-        pin_memory=bool(data_cfg["pin_memory"]),
-    )
-    return train_loader, val_loader
+    # --- 7. Initialize Model, Loss, and Optimizer ---
+    model = DualStreamMusicYOLO(num_anchors=num_anchors).to(device)
+    loss_fn = MusicYOLOLoss(num_anchors=num_anchors).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+    # =========================================================================
+    # MLFLOW INTEGRATION
+    # =========================================================================
+    training_results = {
+        "epochs_completed": 0,
+        "final_loss": None,
+        "best_loss": float('inf'),
+        "checkpoint_path": None
+    }
+    
+    with mlflow.start_run() as run:
+        print(f"MLflow Run ID: {run.info.run_id}")
+        
+        # Log all hyperparameters for this specific run
+        mlflow.log_params({
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "num_epochs": num_epochs,
+            "optimizer": "AdamW",
+            "train_samples": len(train_stems),
+            "val_samples": len(test_stems),
+            "num_anchors": num_anchors
+        })
 
-def build_model(cfg: dict) -> torch.nn.Module:
-    model_name = cfg["model"]["name"]
-    kwargs = cfg["model"].get("kwargs", {})
-    if model_name not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown model: {model_name}")
-    model = MODEL_REGISTRY[model_name](**kwargs)
-    return model
+        # --- 8. Training Loop ---
+        for epoch in range(num_epochs):
+            model.train()
+            
+            # Tracking metrics for the epoch average
+            epoch_loss = 0.0
+            epoch_obj_loss = 0.0
+            epoch_box_loss = 0.0
 
+            progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            
+            for batch in progress_bar:
+                targets = batch['targets'].to(device)
+                features = {k: v.to(device) for k, v in batch['features'].items()}
 
-def build_optimizer(model: torch.nn.Module, cfg: dict) -> torch.optim.Optimizer:
-    opt_cfg = cfg["optim"]
-    name = opt_cfg["name"].lower()
-    lr = float(opt_cfg["lr"])
-    wd = float(opt_cfg.get("weight_decay", 0.0))
+                optimizer.zero_grad()
 
-    if name == "adam":
-        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-    if name == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    if name == "sgd":
-        return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
-
-    raise ValueError(f"Unsupported optimizer: {name}")
-
-
-def validate(
-    model: torch.nn.Module,
-    val_loader: DataLoader,
-    device: torch.device,
-    cfg: dict,
-) -> Dict[str, float]:
-    model.eval()
-    losses = []
-    scores = []
-
-    with torch.no_grad():
-        for batch in val_loader:
-            x = batch["inputs"].to(device)
-            y = batch["targets"].to(device)
-
-            outputs = model(x)
-            loss, _ = compute_loss(outputs, y, cfg)
-            score = batch_dummy_score(outputs, y)
-
-            losses.append(float(loss.detach().cpu().item()))
-            scores.append(float(score))
-
-    return summarize_validation(losses, scores)
-
-
-def run_training(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    run_dir = ensure_dir(Path(cfg["output_root"]) / cfg["run_name"])
-    ckpt_dir = ensure_dir(run_dir / "checkpoints")
-
-    train_loader, val_loader = build_dataloaders(cfg)
-    model = build_model(cfg)
-
-    device_str = cfg["train"]["device"]
-    device = torch.device(device_str if device_str == "cpu" or torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    optimizer = build_optimizer(model, cfg)
-
-    history_csv = run_dir / "history.csv"
-    best_metric = float("-inf")
-    best_epoch = -1
-
-    for epoch in range(1, int(cfg["train"]["epochs"]) + 1):
-        model.train()
-        epoch_loss = 0.0
-        num_batches = 0
-
-        for batch in train_loader:
-            x = batch["inputs"].to(device)
-            y = batch["targets"].to(device)
-
-            optimizer.zero_grad(set_to_none=True)
-            outputs = model(x)
-            loss, loss_dict = compute_loss(outputs, y, cfg)
-            loss.backward()
-
-            grad_clip = cfg["train"].get("grad_clip", None)
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
-
-            optimizer.step()
-
-            epoch_loss += float(loss.detach().cpu().item())
-            num_batches += 1
-
-        train_loss = epoch_loss / max(num_batches, 1)
-
-        metrics = {"val_loss": None, "val_score": None}
-        if epoch % int(cfg["train"]["validate_every"]) == 0:
-            metrics = validate(model, val_loader, device, cfg)
-            current_metric = float(metrics["val_score"])
-
-            if current_metric > best_metric:
-                best_metric = current_metric
-                best_epoch = epoch
-                save_checkpoint(
-                    ckpt_dir / "best.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch,
-                    best_metric=best_metric,
-                    cfg=cfg,
+                predictions = model(
+                    features['posteriorgram'], 
+                    features['embedding'], 
+                    features['confidence'], 
+                    features['gradient']
                 )
 
-        if epoch % int(cfg["train"]["save_every"]) == 0:
-            save_checkpoint(
-                ckpt_dir / f"epoch_{epoch}.pt",
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                best_metric=best_metric,
-                cfg=cfg,
-            )
+                loss_dict = loss_fn(predictions, targets)
+                loss = loss_dict['total_loss']
 
-        log_row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": metrics["val_loss"],
-            "val_score": metrics["val_score"],
-            "best_val_score_so_far": best_metric if best_metric != float("-inf") else None,
-        }
-        append_csv_row(history_csv, log_row)
-        print(log_row)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                optimizer.step()
 
-    summary = {
-        "run_name": cfg["run_name"],
-        "best_epoch": best_epoch,
-        "best_val_score": None if best_metric == float("-inf") else best_metric,
-        "output_dir": str(run_dir),
-    }
-    save_json(run_dir / "summary.json", summary)
-    return summary
+                # Accumulate
+                epoch_loss += loss.item()
+                epoch_obj_loss += loss_dict['loss_obj'].item()
+                epoch_box_loss += loss_dict['loss_box'].item()
+
+                progress_bar.set_postfix({
+                    'Loss': f"{loss.item():.4f}", 
+                    'Obj': f"{loss_dict['loss_obj'].item():.4f}", 
+                    'Box': f"{loss_dict['loss_box'].item():.4f}"
+                })
+
+            # Calculate and log the epoch averages to MLflow
+            num_batches = len(dataloader)
+            avg_loss = epoch_loss / num_batches
+            avg_obj = epoch_obj_loss / num_batches
+            avg_box = epoch_box_loss / num_batches
+            
+            mlflow.log_metrics({
+                "train_loss": avg_loss,
+                "loss_objectness": avg_obj,
+                "loss_box_coord": avg_box
+            }, step=epoch + 1)
+
+            print(f"End of Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
+            training_results["epochs_completed"] = epoch + 1
+            training_results["final_loss"] = avg_loss
+            
+            # Track best loss
+            if avg_loss < training_results["best_loss"]:
+                training_results["best_loss"] = avg_loss
+
+            # Save Checkpoint at specified interval
+            if (epoch + 1) % save_every == 0:
+                ckpt_path = str(checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt")
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': avg_loss,
+                    'config': cfg
+                }, ckpt_path)
+                
+                # Log checkpoint to MLflow
+                mlflow.log_artifact(ckpt_path, artifact_path="checkpoints")
+                training_results["checkpoint_path"] = ckpt_path
+                print(f"Saved and logged checkpoint: {ckpt_path}")
+        
+        # Log final artifacts
+        mlflow.log_artifact(str(run_dir / "resolved_config.yaml"), artifact_path="config")
+
+    print("\n=== Training Complete ===")
+    print(f"Total Epochs: {training_results['epochs_completed']}")
+    print(f"Final Loss: {training_results['final_loss']:.4f}")
+    print(f"Best Loss: {training_results['best_loss']:.4f}")
+    print(f"Checkpoints saved to: {checkpoint_dir}")
+    
+    return training_results
+
+
+if __name__ == "__main__":
+    # For standalone execution (not recommended; use run_train.py instead)
+    raise RuntimeError("Please use scripts/run_train.py to launch training with proper config.")

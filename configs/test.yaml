@@ -1,14 +1,12 @@
 seed: 42
-run_name: crepe_yolo_base_run
+run_name: test_dry_run
 output_root: outputs
 
-# Data configuration
+# Data configuration (same as base but for quick testing)
 data:
-  # Path to pre-computed features (from precompute_features.py)
   processed_dir: data/processed/itm_flute
   batch_size: 4
   num_workers: 0
-  # Train/test split
   test_size: 0.2
 
 # Model configuration
@@ -21,19 +19,19 @@ optim:
   lr: 1.0e-4
   weight_decay: 1.0e-4
 
-# Training configuration
+# Training configuration (MINIMAL for dry run)
 train:
-  epochs: 300
+  epochs: 2                    # Just 2 epochs to test
   device: cuda
   grad_clip: 5.0
-  save_every: 10
+  save_every: 1               # Save after each epoch for inspection
 
 # MLflow configuration
 mlflow:
   tracking_uri: file:./mlruns
-  experiment_name: CREPE-YOLO-Transcription
+  experiment_name: CREPE-YOLO-Testing
 
-# Evaluation configuration (for evaluate.py)
+# Evaluation configuration
 eval:
   conf_threshold: 0.5
   nms_iou_threshold: 0.4

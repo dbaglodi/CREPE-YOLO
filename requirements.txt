@@ -1,11 +1,25 @@
-pyyaml
-torch
-numpy
-crepe
-mir_eval
-scipy
-matplotlib
-tqdm
-librosa
-soundfile
-note_seq==0.0.5
+# CREPE-YOLO Requirements
+# Use: pip install --no-build-isolation -r requirements.txt
+# OR: conda env create -f configs/environment.yml (recommended)
+
+# Core ML frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+tensorflow>=2.13.0
+
+# Audio & Music Processing
+crepe==0.0.15
+librosa>=0.10.0
+soundfile>=0.12.0
+mir_eval>=0.7.1
+
+# MLflow tracking
+mlflow>=2.0.0
+
+# Utilities
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+pyyaml>=6.0.0
+tqdm>=4.65.0
+matplotlib>=3.7.0
