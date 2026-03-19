@@ -1,187 +1,357 @@
-from __future__ import annotations
-
+import os
+import glob
+import re
+import argparse
+import sys
 from pathlib import Path
-from typing import Any, Dict
-
 import torch
+import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+import mlflow
 
-from data.datasets import ManifestAudioDataset
-from models.registry import MODEL_REGISTRY
-from training.checkpointing import save_checkpoint
-from training.losses import compute_loss
-from training.metrics import batch_dummy_score, summarize_validation
-from training.utils import append_csv_row, ensure_dir, save_json
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
+from training.dataset import MusicNoteDataset
+from training.model import DualStreamMusicYOLO
+from training.loss import MusicYOLOLoss
+from training.utils import load_yaml, music_yolo_collate_fn, get_train_test_split
 
-def build_dataloaders(cfg: dict) -> tuple[DataLoader, DataLoader]:
-    data_cfg = cfg["data"]
-    target_dim = cfg["loss"]["target_dim"]
-
-    train_ds = ManifestAudioDataset(
-        manifest_path=data_cfg["train_manifest"],
-        data_root=data_cfg["data_root"],
-        input_num_samples=data_cfg["input_num_samples"],
-        target_dim=target_dim,
-    )
-    val_ds = ManifestAudioDataset(
-        manifest_path=data_cfg["val_manifest"],
-        data_root=data_cfg["data_root"],
-        input_num_samples=data_cfg["input_num_samples"],
-        target_dim=target_dim,
-    )
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=data_cfg["batch_size"],
-        shuffle=True,
-        num_workers=data_cfg["num_workers"],
-        pin_memory=bool(data_cfg["pin_memory"]),
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=data_cfg["batch_size"],
-        shuffle=False,
-        num_workers=data_cfg["num_workers"],
-        pin_memory=bool(data_cfg["pin_memory"]),
-    )
-    return train_loader, val_loader
+def get_latest_checkpoint(checkpoint_dir):
+    """Finds the checkpoint file with the highest epoch number in the directory."""
+    if not os.path.exists(checkpoint_dir):
+        return None
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "crepe_yolo_epoch_*.pt"))
+    if not checkpoint_files:
+        return None
+    
+    # Extract epoch numbers using regex: 'crepe_yolo_epoch_50.pt' -> 50
+    epochs = []
+    for f in checkpoint_files:
+        match = re.search(r'epoch_(\d+).pt', f)
+        if match:
+            epochs.append((int(match.group(1)), f))
+    
+    if not epochs:
+        return None
+        
+    # Return the path of the one with the maximum epoch number
+    return max(epochs, key=lambda x: x[0])[1]
 
 
-def build_model(cfg: dict) -> torch.nn.Module:
-    model_name = cfg["model"]["name"]
-    kwargs = cfg["model"].get("kwargs", {})
-    if model_name not in MODEL_REGISTRY:
-        raise ValueError(f"Unknown model: {model_name}")
-    model = MODEL_REGISTRY[model_name](**kwargs)
-    return model
+def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg):
+    """Run validation loss and MIR-style metrics on the held-out split."""
+    if len(val_dataset) == 0:
+        return {}
 
-
-def build_optimizer(model: torch.nn.Module, cfg: dict) -> torch.optim.Optimizer:
-    opt_cfg = cfg["optim"]
-    name = opt_cfg["name"].lower()
-    lr = float(opt_cfg["lr"])
-    wd = float(opt_cfg.get("weight_decay", 0.0))
-
-    if name == "adam":
-        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
-    if name == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    if name == "sgd":
-        return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=wd, momentum=0.9)
-
-    raise ValueError(f"Unsupported optimizer: {name}")
-
-
-def validate(
-    model: torch.nn.Module,
-    val_loader: DataLoader,
-    device: torch.device,
-    cfg: dict,
-) -> Dict[str, float]:
     model.eval()
-    losses = []
-    scores = []
+    total_loss = 0.0
+    total_obj = 0.0
+    total_box = 0.0
+    num_batches = 0
 
     with torch.no_grad():
-        for batch in val_loader:
-            x = batch["inputs"].to(device)
-            y = batch["targets"].to(device)
-
-            outputs = model(x)
-            loss, _ = compute_loss(outputs, y, cfg)
-            score = batch_dummy_score(outputs, y)
-
-            losses.append(float(loss.detach().cpu().item()))
-            scores.append(float(score))
-
-    return summarize_validation(losses, scores)
-
-
-def run_training(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    run_dir = ensure_dir(Path(cfg["output_root"]) / cfg["run_name"])
-    ckpt_dir = ensure_dir(run_dir / "checkpoints")
-
-    train_loader, val_loader = build_dataloaders(cfg)
-    model = build_model(cfg)
-
-    device_str = cfg["train"]["device"]
-    device = torch.device(device_str if device_str == "cpu" or torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    optimizer = build_optimizer(model, cfg)
-
-    history_csv = run_dir / "history.csv"
-    best_metric = float("-inf")
-    best_epoch = -1
-
-    for epoch in range(1, int(cfg["train"]["epochs"]) + 1):
-        model.train()
-        epoch_loss = 0.0
-        num_batches = 0
-
-        for batch in train_loader:
-            x = batch["inputs"].to(device)
-            y = batch["targets"].to(device)
-
-            optimizer.zero_grad(set_to_none=True)
-            outputs = model(x)
-            loss, loss_dict = compute_loss(outputs, y, cfg)
-            loss.backward()
-
-            grad_clip = cfg["train"].get("grad_clip", None)
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
-
-            optimizer.step()
-
-            epoch_loss += float(loss.detach().cpu().item())
+        for batch in val_dataloader:
+            targets = batch['targets'].to(device)
+            features = {k: v.to(device) for k, v in batch['features'].items()}
+            predictions = model(
+                features['posteriorgram'],
+                features['embedding'],
+                features['confidence'],
+                features['gradient'],
+            )
+            loss_dict = loss_fn(predictions, targets)
+            total_loss += loss_dict['total_loss'].item()
+            total_obj += loss_dict['loss_obj'].item()
+            total_box += loss_dict['loss_box'].item()
             num_batches += 1
 
-        train_loss = epoch_loss / max(num_batches, 1)
+    metrics = {
+        "val_loss": total_loss / num_batches,
+        "val_loss_objectness": total_obj / num_batches,
+        "val_loss_box_coord": total_box / num_batches,
+    }
 
-        metrics = {"val_loss": None, "val_score": None}
-        if epoch % int(cfg["train"]["validate_every"]) == 0:
-            metrics = validate(model, val_loader, device, cfg)
-            current_metric = float(metrics["val_score"])
+    from training.evaluate import run_full_metrics
 
-            if current_metric > best_metric:
-                best_metric = current_metric
-                best_epoch = epoch
-                save_checkpoint(
-                    ckpt_dir / "best.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    epoch=epoch,
-                    best_metric=best_metric,
-                    cfg=cfg,
+    anchors = loss_fn.anchors.detach().to(device)
+    conf_threshold = eval_cfg.get("conf_threshold", 0.4)
+    nms_iou_threshold = eval_cfg.get("nms_iou_threshold", 0.4)
+    prediction_cache = []
+
+    with torch.no_grad():
+        for i in range(len(val_dataset)):
+            item = val_dataset[i]
+            features = {k: v.to(device) for k, v in item['features'].items()}
+            if features['posteriorgram'].dim() == 3:
+                features['posteriorgram'] = features['posteriorgram'].unsqueeze(1)
+            prediction_cache.append(
+                model(
+                    features['posteriorgram'],
+                    features['embedding'],
+                    features['confidence'],
+                    features['gradient'],
                 )
-
-        if epoch % int(cfg["train"]["save_every"]) == 0:
-            save_checkpoint(
-                ckpt_dir / f"epoch_{epoch}.pt",
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                best_metric=best_metric,
-                cfg=cfg,
             )
 
-        log_row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": metrics["val_loss"],
-            "val_score": metrics["val_score"],
-            "best_val_score_so_far": best_metric if best_metric != float("-inf") else None,
-        }
-        append_csv_row(history_csv, log_row)
-        print(log_row)
+    mir_metrics = run_full_metrics(
+        prediction_cache,
+        val_dataset,
+        anchors,
+        conf_threshold,
+        nms_iou_threshold,
+    )
+    metrics.update({
+        "val_P": mir_metrics["P"],
+        "val_R": mir_metrics["R"],
+        "val_F1": mir_metrics["F1"],
+        "val_AOR": mir_metrics["AOR"],
+        "val_P_op": mir_metrics["P_op"],
+        "val_R_op": mir_metrics["R_op"],
+        "val_F1_op": mir_metrics["F1_op"],
+    })
+    return metrics
 
-    summary = {
-        "run_name": cfg["run_name"],
-        "best_epoch": best_epoch,
-        "best_val_score": None if best_metric == float("-inf") else best_metric,
-        "output_dir": str(run_dir),
-    }
-    save_json(run_dir / "summary.json", summary)
-    return summary
+def train(cfg: dict | None = None, resume: bool = False):
+    # --- 1. Hardware Setup ---
+    cfg = cfg or {}
+    data_cfg = cfg.get("data", {})
+    model_cfg = cfg.get("model", {})
+    optim_cfg = cfg.get("optim", {})
+    train_cfg = cfg.get("train", {})
+    mlflow_cfg = cfg.get("mlflow", {})
+    eval_cfg = cfg.get("eval", {})
+
+    requested_device = train_cfg.get(
+        "device",
+        'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
+    )
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        requested_device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    elif requested_device == "mps" and not torch.backends.mps.is_available():
+        requested_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    device = torch.device(requested_device)
+    print(f"--- Training Session Started ---")
+    print(f"Target Device: {device}")
+
+    # --- 2. Configuration ---
+    # Legacy fallback values kept here for quick rollback after the smoke test:
+    # checkpoint_dir = 'checkpoints'
+    # processed_dir = 'data/processed/itm_flute'
+    # batch_size = 4
+    # num_epochs = 150
+    # learning_rate = 1e-4
+    # weight_decay = 1e-4
+    # num_workers = 0
+    # grad_clip = 5.0
+    # save_every = 10
+
+    output_root = cfg.get("output_root", "outputs")
+    run_name = cfg.get("run_name", "legacy_run")
+    checkpoint_dir = os.path.join(output_root, run_name, "checkpoints")
+    processed_dir = data_cfg.get("processed_dir", 'data/processed/itm_flute')
+    batch_size = data_cfg.get("batch_size", 4)
+    num_workers = data_cfg.get("num_workers", 0)
+    test_size = data_cfg.get("test_size", 0.2)
+    num_epochs = train_cfg.get("epochs", 150)
+    learning_rate = optim_cfg.get("lr", 1e-4)
+    weight_decay = optim_cfg.get("weight_decay", 1e-4)
+    grad_clip = train_cfg.get("grad_clip", 5.0)
+    save_every = train_cfg.get("save_every", 10)
+    num_anchors = model_cfg.get("num_anchors", 3)
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Processed data directory: {processed_dir}")
+    print(f"Checkpoint directory: {checkpoint_dir}")
+
+    # --- 3. Data Preparation ---
+    if not os.path.exists(processed_dir):
+        raise FileNotFoundError(f"Data directory {processed_dir} not found. Run preprocess_dataset.py and precompute_features.py first.")
+        
+    all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
+    train_stems, val_stems = get_train_test_split(all_stems, test_size=test_size, seed=cfg.get("seed", 42))
+    print(f"Dataset Split: {len(train_stems)} training | {len(val_stems)} validation")
+
+    train_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)
+    dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size, 
+        shuffle=True, 
+        collate_fn=music_yolo_collate_fn,
+        num_workers=num_workers
+    )
+    val_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=val_stems)
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=music_yolo_collate_fn,
+        num_workers=num_workers,
+    )
+
+    # --- 4. Model & Optimizer Initialization ---
+    model = DualStreamMusicYOLO(num_anchors=num_anchors).to(device)
+    loss_fn = MusicYOLOLoss(num_anchors=num_anchors).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    # --- 5. Resume Logic (Weights + MLflow Run ID) ---
+    start_epoch = 0
+    active_run_id = None
+    latest_ckpt = get_latest_checkpoint(checkpoint_dir)
+
+    if latest_ckpt and resume:
+        print(f"📦 Resuming from checkpoint: {latest_ckpt}")
+        # map_location ensures we can move between Mac (MPS) and Linux (CUDA)
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        active_run_id = checkpoint.get('run_id') # Retrieve the original MLflow run ID
+        print(f"✅ Successfully loaded. Restarting at Epoch {start_epoch}")
+    else:
+        reason = "Resume not requested" if not resume else "No previous checkpoints found"
+        print(f"🌱 Starting fresh training run. ({reason})")
+
+    # --- 6. MLflow Tracking ---
+    mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
+    mlflow.set_experiment(mlflow_cfg.get("experiment_name", "CREPE-YOLO-Transcription"))
+    
+    # If active_run_id is None, a new run starts. If it exists, it re-opens the old one.
+    with mlflow.start_run(run_id=active_run_id) as run:
+        current_run_id = run.info.run_id
+        best_val_f1_op = float("-inf")
+        best_val_loss = float("inf")
+        best_ckpt_path = os.path.join(checkpoint_dir, "best_val_f1_op.pt")
+        if active_run_id:
+            print(f"📈 Continuing MLflow Run: {current_run_id}")
+        else:
+            print(f"🚀 New MLflow Run ID: {current_run_id}")
+            mlflow.log_params({
+                "run_name": run_name,
+                "processed_dir": processed_dir,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "num_epochs": num_epochs,
+                "weight_decay": weight_decay,
+                "grad_clip": grad_clip,
+                "save_every": save_every,
+                "num_anchors": num_anchors,
+                "train_samples": len(train_stems),
+                "val_samples": len(val_stems),
+                "device": str(device)
+            })
+
+        # --- 7. Main Training Loop ---
+        for epoch in range(start_epoch, num_epochs):
+            model.train()
+            epoch_loss = 0.0
+            epoch_obj_loss = 0.0
+            epoch_box_loss = 0.0
+
+            progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            
+            for batch in progress_bar:
+                targets = batch['targets'].to(device)
+                features = {k: v.to(device) for k, v in batch['features'].items()}
+
+                optimizer.zero_grad()
+
+                predictions = model(
+                    features['posteriorgram'], 
+                    features['embedding'], 
+                    features['confidence'], 
+                    features['gradient']
+                )
+
+                loss_dict = loss_fn(predictions, targets)
+                loss = loss_dict['total_loss']
+
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                optimizer.step()
+
+                # Metrics Tracking
+                epoch_loss += loss.item()
+                epoch_obj_loss += loss_dict['loss_obj'].item()
+                epoch_box_loss += loss_dict['loss_box'].item()
+
+                progress_bar.set_postfix({
+                    'Loss': f"{loss.item():.2f}", 
+                    'Obj': f"{loss_dict['loss_obj'].item():.2f}"
+                })
+
+            # End of Epoch Stats
+            avg_loss = epoch_loss / len(dataloader)
+            epoch_metrics = {
+                "train_loss": avg_loss,
+                "loss_objectness": epoch_obj_loss / len(dataloader),
+                "loss_box_coord": epoch_box_loss / len(dataloader)
+            }
+            val_metrics = run_validation(
+                model,
+                loss_fn,
+                val_dataloader,
+                val_dataset,
+                device,
+                eval_cfg,
+            )
+            epoch_metrics.update(val_metrics)
+            mlflow.log_metrics(epoch_metrics, step=epoch + 1)
+
+            if "val_F1_op" in val_metrics:
+                if val_metrics["val_F1_op"] > best_val_f1_op:
+                    best_val_f1_op = val_metrics["val_F1_op"]
+                    torch.save({
+                        'epoch': epoch,
+                        'run_id': current_run_id,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'config': cfg,
+                        'best_val_F1_op': best_val_f1_op,
+                    }, best_ckpt_path)
+                    print(f"🏆 Updated best model: {best_ckpt_path}")
+            if "val_loss" in val_metrics:
+                best_val_loss = min(best_val_loss, val_metrics["val_loss"])
+
+            print(
+                f"End of Epoch {epoch+1} | "
+                f"Train Loss: {avg_loss:.4f} | "
+                f"Val Loss: {val_metrics.get('val_loss', float('nan')):.4f} | "
+                f"Val F1(op): {val_metrics.get('val_F1_op', float('nan')):.4f}"
+            )
+
+            # --- 8. Periodic Checkpointing ---
+            if save_every > 0 and (epoch + 1) % save_every == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"crepe_yolo_epoch_{epoch+1}.pt")
+                torch.save({
+                    'epoch': epoch,
+                    'run_id': current_run_id, # CRITICAL: Saves the run ID so charts connect
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'config': cfg,
+                }, ckpt_path)
+                
+                mlflow.log_artifact(ckpt_path)
+                print(f"💾 Saved checkpoint to {ckpt_path}")
+
+        if best_val_f1_op != float("-inf"):
+            mlflow.log_metric("best_val_F1_op", best_val_f1_op)
+            if os.path.exists(best_ckpt_path):
+                mlflow.log_artifact(best_ckpt_path)
+        if best_val_loss != float("inf"):
+            mlflow.log_metric("best_val_loss", best_val_loss)
+
+    print("--- Training Complete ---")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train or Resume CREPE-YOLO")
+    parser.add_argument('--resume', action='store_true', help="Try to resume from the latest checkpoint if it exists")
+    parser.add_argument('--config', type=str, default=None, help="Optional YAML config path.")
+    args = parser.parse_args()
+
+    cfg = load_yaml(args.config) if args.config else None
+    train(cfg=cfg, resume=args.resume)

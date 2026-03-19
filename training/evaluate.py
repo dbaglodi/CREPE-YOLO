@@ -1,13 +1,21 @@
 import os
+import sys
 import argparse
+from pathlib import Path
+
 import torch
 import numpy as np
 import mir_eval
 from tqdm import tqdm
 
-from dataset import MusicNoteDataset
-from model import DualStreamMusicYOLO
-from utils import decode_predictions, boxes_to_midi_notes, get_train_test_split
+# Add project root to path so explicit training.* imports work in script mode.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from training.dataset import MusicNoteDataset
+from training.model import DualStreamMusicYOLO
+from training.utils import decode_predictions, boxes_to_midi_notes, get_train_test_split, load_yaml
 
 def notes_to_mir_arrays(notes):
     """Converts note dicts to NumPy arrays for mir_eval processing."""
@@ -71,11 +79,17 @@ def print_mir_table(metrics, model_name="CREPE-YOLO"):
 def main():
     parser = argparse.ArgumentParser(description="CREPE-YOLO Evaluation and Tuning")
     parser.add_argument('--tune', action='store_true', help="Run grid search for thresholds")
-    parser.add_argument('--ckpt', type=str, default='checkpoints/crepe_yolo_epoch_60.pt')
+    parser.add_argument('--config', type=str, default='configs/base.yaml')
+    parser.add_argument('--ckpt', type=str, default='outputs/crepe_yolo_base_run/checkpoints/checkpoint_epoch_60.pt')
     args = parser.parse_args()
 
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+    cfg = load_yaml(str(config_path))
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-    processed_dir = 'processed/itm_flute'
+    processed_dir = cfg["data"]["processed_dir"]
     
     # Setup Model and Data
     model = DualStreamMusicYOLO(num_anchors=3).to(device)

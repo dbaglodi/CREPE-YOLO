@@ -1,11 +1,17 @@
 import os
 import random
+import sys
+from pathlib import Path
+
 import librosa
 import soundfile as sf
 from tqdm import tqdm
 
-# Import your split logic to protect the test set
-from utils import get_train_test_split
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from training.utils import get_train_test_split
 
 def augment_annotation(txt_path, out_path, new_filename_ref, pitch_steps=0, stretch_rate=1.0):
     """Parses the specific ITM Flute .txt format and mathematically shifts the labels."""

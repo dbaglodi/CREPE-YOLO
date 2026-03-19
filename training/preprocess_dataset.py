@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # Update this path to wherever you downloaded the Google Drive folder!
 RAW_DATASET_PATH = Path('./GT-ITM-Flute-99')
-OUT_DIR = Path('./processed/itm_flute')
+OUT_DIR = Path('./data/processed/itm_flute')
 
 NOTE_MAP = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
 
@@ -99,7 +99,7 @@ def process_dataset():
 
     print("\n=== PREPROCESSING COMPLETE ===")
     print(f"Data is ready in {OUT_DIR}")
-    print("Next step: Run 'python precompute_features.py' to generate CREPE tensors.")
+    print("Next step: Run 'python training/precompute_features.py' to generate CREPE tensors.")
 
 if __name__ == "__main__":
     process_dataset()
