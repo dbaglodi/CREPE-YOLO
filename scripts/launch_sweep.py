@@ -64,6 +64,10 @@ def parse_args() -> argparse.Namespace:
         default=[3.0, 5.0],
         help="Gradient clipping values to sweep.",
     )
+    parser.add_argument("--train-size", type=float, default=0.64)
+    parser.add_argument("--val-size", type=float, default=0.16)
+    parser.add_argument("--test-size", type=float, default=0.20)
+    parser.add_argument("--save-every", type=int, default=5)
     return parser.parse_args()
 
 
@@ -87,7 +91,13 @@ def main() -> None:
         cfg["optim"]["lr"] = lr
         cfg["optim"]["weight_decay"] = wd
         cfg["data"]["batch_size"] = bs
+        cfg["data"]["train_size"] = args.train_size
+        cfg["data"]["val_size"] = args.val_size
+        cfg["data"]["test_size"] = args.test_size
+        cfg["data"]["combine_val_to_train"] = False
+        cfg["data"]["train_set_usage"] = 1.0
         cfg["train"]["grad_clip"] = gc
+        cfg["train"]["save_every"] = args.save_every
         cfg["run_name"] = f"sweep_lr{lr}_bs{bs}_wd{wd}_gc{gc}".replace(".", "p")
 
         config_path = out_dir / f"{cfg['run_name']}.yaml"

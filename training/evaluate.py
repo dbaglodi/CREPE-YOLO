@@ -99,7 +99,16 @@ def main():
     
     anchors = torch.tensor([[0.0026, 0.0139],[0.0062, 0.0139],[0.0153, 0.0139]], device=device)
     all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
-    _, test_stems = get_train_val_test_split(all_stems, combine_val_to_train=False)
+    data_cfg = cfg.get("data", {})
+    _, _, test_stems = get_train_val_test_split(
+        all_stems,
+        train_size=data_cfg.get("train_size", 0.64),
+        val_size=data_cfg.get("val_size", 0.16),
+        test_size=data_cfg.get("test_size", 0.20),
+        combine_val_to_train=False,
+        train_set_usage=1.0,
+        seed=cfg.get("seed", 42),
+    )
     dataset = MusicNoteDataset(processed_dir=processed_dir, stems=test_stems)
 
     # 1. Inference Pass (Cached)
