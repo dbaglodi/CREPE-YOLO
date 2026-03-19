@@ -67,13 +67,12 @@ class MusicNoteDataset(Dataset):
         features_path = os.path.join(stem_dir, 'features.pt')
         features = torch.load(features_path, weights_only=True) 
         
-        # 2. Load Notes
+        # 2. Load Ground Truth Notes
         notes_path = os.path.join(stem_dir, 'notes.json')
         with open(notes_path, 'r') as f:
             notes = json.load(f)
             
-        # 3. Calculate Targets
-        # total_time_sec is based on the padded tensor size and step size
+        # 3. Calculate Duration and Targets
         T_padded = features['posteriorgram'].shape[-1]
         total_time_sec = T_padded * (self.step_size_ms / 1000.0)
         
@@ -82,5 +81,8 @@ class MusicNoteDataset(Dataset):
         return {
             'stem': stem,
             'features': features,
-            'targets': targets
+            'targets': targets,
+            # --- Added for Evaluation ---
+            'notes': notes,
+            'total_time_sec': total_time_sec
         }
