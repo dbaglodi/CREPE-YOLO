@@ -13,8 +13,11 @@ GT-ITM-Flute-99*
 
 # Python cache
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.py[cod]
 *.egg-info/
 .pytest_cache/
 

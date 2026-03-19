@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 def analyze_dataset_anchors():
-    processed_dir = 'processed/itm_flute'
+    processed_dir = 'data/processed/itm-flute'
     step_size_ms = 10.0 # Standard CREPE step size
     
     durations_sec = []

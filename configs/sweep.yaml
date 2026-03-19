@@ -1,0 +1,35 @@
+seed: 42
+run_name: crepe_yolo_sweep_base
+output_root: outputs
+
+data:
+  processed_dir: data/processed/itm_flute
+  batch_size: 4
+  num_workers: 0
+  test_size: 0.2
+
+model:
+  num_anchors: 3
+
+optim:
+  name: adamw
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+
+train:
+  epochs: 20
+  device: cuda
+  grad_clip: 5.0
+  save_every: 0
+
+mlflow:
+  tracking_uri: file:./mlruns
+  experiment_name: CREPE-YOLO-Sweep
+
+eval:
+  conf_threshold: 0.4
+  nms_iou_threshold: 0.4
+  onset_tolerance: 0.05
+  offset_ratio: 0.20
+  offset_min: 0.05
+  pitch_tolerance: 0.5

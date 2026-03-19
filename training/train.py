@@ -1,142 +1,253 @@
-# train.py
 import os
+import glob
+import re
+import argparse
 import sys
 from pathlib import Path
-
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import mlflow
 
-# Add training directory to path for local imports
-TRAINING_DIR = Path(__file__).resolve().parent
-if str(TRAINING_DIR) not in sys.path:
-    sys.path.insert(0, str(TRAINING_DIR))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from dataset import MusicNoteDataset
-from model import DualStreamMusicYOLO
-from loss import MusicYOLOLoss
-from utils import music_yolo_collate_fn, get_train_test_split
+from training.dataset import MusicNoteDataset
+from training.model import DualStreamMusicYOLO
+from training.loss import MusicYOLOLoss
+from training.utils import load_yaml, music_yolo_collate_fn, get_train_test_split
+
+def get_latest_checkpoint(checkpoint_dir):
+    """Finds the checkpoint file with the highest epoch number in the directory."""
+    if not os.path.exists(checkpoint_dir):
+        return None
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "crepe_yolo_epoch_*.pt"))
+    if not checkpoint_files:
+        return None
+    
+    # Extract epoch numbers using regex: 'crepe_yolo_epoch_50.pt' -> 50
+    epochs = []
+    for f in checkpoint_files:
+        match = re.search(r'epoch_(\d+).pt', f)
+        if match:
+            epochs.append((int(match.group(1)), f))
+    
+    if not epochs:
+        return None
+        
+    # Return the path of the one with the maximum epoch number
+    return max(epochs, key=lambda x: x[0])[1]
 
 
-def run_training(cfg: dict) -> dict:
-    """
-    Main training function that accepts a config dictionary.
-    
-    Args:
-        cfg: Configuration dict with keys:
-            - seed: Random seed
-            - run_name: Name for this run
-            - output_root: Root directory for outputs
-            - data: dict with processed_dir, batch_size, num_workers
-            - model: dict with num_anchors
-            - optim: dict with lr, weight_decay, name
-            - train: dict with epochs, device, grad_clip, save_every
-            - mlflow: dict with tracking_uri, experiment_name
-    
-    Returns:
-        Summary dict with training results
-    """
-    # --- 1. Setup Device ---
-    device_str = cfg.get("train", {}).get("device", "cuda")
-    device = torch.device(device_str if torch.cuda.is_available() else 'cpu')
-    print(f"--- Starting Training on device: {device} ---")
-    print(f"--- Run Name: {cfg.get('run_name', 'unnamed')} ---")
+def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg):
+    """Run validation loss and MIR-style metrics on the held-out split."""
+    if len(val_dataset) == 0:
+        return {}
 
-    # --- 2. Extract Configuration ---
-    seed = cfg.get("seed", 42)
-    run_name = cfg.get("run_name", "default_run")
-    output_root = cfg.get("output_root", "outputs")
-    
-    # Data config
-    processed_dir = cfg["data"]["processed_dir"]
-    batch_size = cfg["data"]["batch_size"]
-    num_workers = cfg["data"].get("num_workers", 0)
-    test_size = cfg["data"].get("test_size", 0.2)
-    
-    # Model config
-    num_anchors = cfg["model"].get("num_anchors", 3)
-    
-    # Optimizer config
-    learning_rate = cfg["optim"]["lr"]
-    weight_decay = cfg["optim"].get("weight_decay", 0.0)
-    
-    # Training config
-    num_epochs = cfg["train"]["epochs"]
-    grad_clip = cfg["train"].get("grad_clip", 5.0)
-    save_every = cfg["train"].get("save_every", 10)
-    
-    # MLflow config
+    model.eval()
+    total_loss = 0.0
+    total_obj = 0.0
+    total_box = 0.0
+    num_batches = 0
+
+    with torch.no_grad():
+        for batch in val_dataloader:
+            targets = batch['targets'].to(device)
+            features = {k: v.to(device) for k, v in batch['features'].items()}
+            predictions = model(
+                features['posteriorgram'],
+                features['embedding'],
+                features['confidence'],
+                features['gradient'],
+            )
+            loss_dict = loss_fn(predictions, targets)
+            total_loss += loss_dict['total_loss'].item()
+            total_obj += loss_dict['loss_obj'].item()
+            total_box += loss_dict['loss_box'].item()
+            num_batches += 1
+
+    metrics = {
+        "val_loss": total_loss / num_batches,
+        "val_loss_objectness": total_obj / num_batches,
+        "val_loss_box_coord": total_box / num_batches,
+    }
+
+    from training.evaluate import run_full_metrics
+
+    anchors = loss_fn.anchors.detach().to(device)
+    conf_threshold = eval_cfg.get("conf_threshold", 0.4)
+    nms_iou_threshold = eval_cfg.get("nms_iou_threshold", 0.4)
+    prediction_cache = []
+
+    with torch.no_grad():
+        for i in range(len(val_dataset)):
+            item = val_dataset[i]
+            features = {k: v.to(device) for k, v in item['features'].items()}
+            if features['posteriorgram'].dim() == 3:
+                features['posteriorgram'] = features['posteriorgram'].unsqueeze(1)
+            prediction_cache.append(
+                model(
+                    features['posteriorgram'],
+                    features['embedding'],
+                    features['confidence'],
+                    features['gradient'],
+                )
+            )
+
+    mir_metrics = run_full_metrics(
+        prediction_cache,
+        val_dataset,
+        anchors,
+        conf_threshold,
+        nms_iou_threshold,
+    )
+    metrics.update({
+        "val_P": mir_metrics["P"],
+        "val_R": mir_metrics["R"],
+        "val_F1": mir_metrics["F1"],
+        "val_AOR": mir_metrics["AOR"],
+        "val_P_op": mir_metrics["P_op"],
+        "val_R_op": mir_metrics["R_op"],
+        "val_F1_op": mir_metrics["F1_op"],
+    })
+    return metrics
+
+def train(cfg: dict | None = None, resume: bool = False):
+    # --- 1. Hardware Setup ---
+    cfg = cfg or {}
+    data_cfg = cfg.get("data", {})
+    model_cfg = cfg.get("model", {})
+    optim_cfg = cfg.get("optim", {})
+    train_cfg = cfg.get("train", {})
     mlflow_cfg = cfg.get("mlflow", {})
-    mlflow_uri = mlflow_cfg.get("tracking_uri", "file:./mlruns")
-    mlflow_exp = mlflow_cfg.get("experiment_name", "CREPE-YOLO-Transcription")
+    eval_cfg = cfg.get("eval", {})
 
-    # --- 3. Setup Output Directories ---
-    run_dir = Path(output_root) / run_name
-    checkpoint_dir = run_dir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    requested_device = train_cfg.get(
+        "device",
+        'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu',
+    )
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        requested_device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    elif requested_device == "mps" and not torch.backends.mps.is_available():
+        requested_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # --- 4. Setup MLflow ---
-    mlflow.set_tracking_uri(mlflow_uri)
-    mlflow.set_experiment(mlflow_exp)
+    device = torch.device(requested_device)
+    print(f"--- Training Session Started ---")
+    print(f"Target Device: {device}")
 
-    # --- 5. Verify Dataset ---
+    # --- 2. Configuration ---
+    # Legacy fallback values kept here for quick rollback after the smoke test:
+    # checkpoint_dir = 'checkpoints'
+    # processed_dir = 'data/processed/itm_flute'
+    # batch_size = 4
+    # num_epochs = 150
+    # learning_rate = 1e-4
+    # weight_decay = 1e-4
+    # num_workers = 0
+    # grad_clip = 5.0
+    # save_every = 10
+
+    output_root = cfg.get("output_root", "outputs")
+    run_name = cfg.get("run_name", "legacy_run")
+    checkpoint_dir = os.path.join(output_root, run_name, "checkpoints")
+    processed_dir = data_cfg.get("processed_dir", 'data/processed/itm_flute')
+    batch_size = data_cfg.get("batch_size", 4)
+    num_workers = data_cfg.get("num_workers", 0)
+    test_size = data_cfg.get("test_size", 0.2)
+    num_epochs = train_cfg.get("epochs", 150)
+    learning_rate = optim_cfg.get("lr", 1e-4)
+    weight_decay = optim_cfg.get("weight_decay", 1e-4)
+    grad_clip = train_cfg.get("grad_clip", 5.0)
+    save_every = train_cfg.get("save_every", 10)
+    num_anchors = model_cfg.get("num_anchors", 3)
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Processed data directory: {processed_dir}")
+    print(f"Checkpoint directory: {checkpoint_dir}")
+
+    # --- 3. Data Preparation ---
     if not os.path.exists(processed_dir):
-        raise FileNotFoundError(f"Processed directory not found: {processed_dir}")
-    
+        raise FileNotFoundError(f"Data directory {processed_dir} not found. Run preprocess_dataset.py and precompute_features.py first.")
+        
     all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
-    if not all_stems:
-        raise ValueError(f"No dataset stems found in {processed_dir}")
-    
-    train_stems, test_stems = get_train_test_split(all_stems, test_size=test_size, seed=seed)
-    print(f"Dataset Split: {len(train_stems)} Training | {len(test_stems)} Validation")
+    train_stems, val_stems = get_train_test_split(all_stems, test_size=test_size, seed=cfg.get("seed", 42))
+    print(f"Dataset Split: {len(train_stems)} training | {len(val_stems)} validation")
 
-    # --- 6. Initialize Dataset and DataLoader ---
-    dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)
+    train_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)
     dataloader = DataLoader(
-        dataset, 
+        train_dataset,
         batch_size=batch_size, 
         shuffle=True, 
         collate_fn=music_yolo_collate_fn,
         num_workers=num_workers
     )
+    val_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=val_stems)
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=music_yolo_collate_fn,
+        num_workers=num_workers,
+    )
 
-    # --- 7. Initialize Model, Loss, and Optimizer ---
+    # --- 4. Model & Optimizer Initialization ---
     model = DualStreamMusicYOLO(num_anchors=num_anchors).to(device)
     loss_fn = MusicYOLOLoss(num_anchors=num_anchors).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    # =========================================================================
-    # MLFLOW INTEGRATION
-    # =========================================================================
-    training_results = {
-        "epochs_completed": 0,
-        "final_loss": None,
-        "best_loss": float('inf'),
-        "checkpoint_path": None
-    }
-    
-    with mlflow.start_run() as run:
-        print(f"MLflow Run ID: {run.info.run_id}")
-        
-        # Log all hyperparameters for this specific run
-        mlflow.log_params({
-            "batch_size": batch_size,
-            "learning_rate": learning_rate,
-            "weight_decay": weight_decay,
-            "num_epochs": num_epochs,
-            "optimizer": "AdamW",
-            "train_samples": len(train_stems),
-            "val_samples": len(test_stems),
-            "num_anchors": num_anchors
-        })
+    # --- 5. Resume Logic (Weights + MLflow Run ID) ---
+    start_epoch = 0
+    active_run_id = None
+    latest_ckpt = get_latest_checkpoint(checkpoint_dir)
 
-        # --- 8. Training Loop ---
-        for epoch in range(num_epochs):
+    if latest_ckpt and resume:
+        print(f"📦 Resuming from checkpoint: {latest_ckpt}")
+        # map_location ensures we can move between Mac (MPS) and Linux (CUDA)
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        active_run_id = checkpoint.get('run_id') # Retrieve the original MLflow run ID
+        print(f"✅ Successfully loaded. Restarting at Epoch {start_epoch}")
+    else:
+        reason = "Resume not requested" if not resume else "No previous checkpoints found"
+        print(f"🌱 Starting fresh training run. ({reason})")
+
+    # --- 6. MLflow Tracking ---
+    mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
+    mlflow.set_experiment(mlflow_cfg.get("experiment_name", "CREPE-YOLO-Transcription"))
+    
+    # If active_run_id is None, a new run starts. If it exists, it re-opens the old one.
+    with mlflow.start_run(run_id=active_run_id) as run:
+        current_run_id = run.info.run_id
+        best_val_f1_op = float("-inf")
+        best_val_loss = float("inf")
+        best_ckpt_path = os.path.join(checkpoint_dir, "best_val_f1_op.pt")
+        if active_run_id:
+            print(f"📈 Continuing MLflow Run: {current_run_id}")
+        else:
+            print(f"🚀 New MLflow Run ID: {current_run_id}")
+            mlflow.log_params({
+                "run_name": run_name,
+                "processed_dir": processed_dir,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "num_epochs": num_epochs,
+                "weight_decay": weight_decay,
+                "grad_clip": grad_clip,
+                "save_every": save_every,
+                "num_anchors": num_anchors,
+                "train_samples": len(train_stems),
+                "val_samples": len(val_stems),
+                "device": str(device)
+            })
+
+        # --- 7. Main Training Loop ---
+        for epoch in range(start_epoch, num_epochs):
             model.train()
-            
-            # Tracking metrics for the epoch average
             epoch_loss = 0.0
             epoch_obj_loss = 0.0
             epoch_box_loss = 0.0
@@ -163,65 +274,84 @@ def run_training(cfg: dict) -> dict:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
 
-                # Accumulate
+                # Metrics Tracking
                 epoch_loss += loss.item()
                 epoch_obj_loss += loss_dict['loss_obj'].item()
                 epoch_box_loss += loss_dict['loss_box'].item()
 
                 progress_bar.set_postfix({
-                    'Loss': f"{loss.item():.4f}", 
-                    'Obj': f"{loss_dict['loss_obj'].item():.4f}", 
-                    'Box': f"{loss_dict['loss_box'].item():.4f}"
+                    'Loss': f"{loss.item():.2f}", 
+                    'Obj': f"{loss_dict['loss_obj'].item():.2f}"
                 })
 
-            # Calculate and log the epoch averages to MLflow
-            num_batches = len(dataloader)
-            avg_loss = epoch_loss / num_batches
-            avg_obj = epoch_obj_loss / num_batches
-            avg_box = epoch_box_loss / num_batches
-            
-            mlflow.log_metrics({
+            # End of Epoch Stats
+            avg_loss = epoch_loss / len(dataloader)
+            epoch_metrics = {
                 "train_loss": avg_loss,
-                "loss_objectness": avg_obj,
-                "loss_box_coord": avg_box
-            }, step=epoch + 1)
+                "loss_objectness": epoch_obj_loss / len(dataloader),
+                "loss_box_coord": epoch_box_loss / len(dataloader)
+            }
+            val_metrics = run_validation(
+                model,
+                loss_fn,
+                val_dataloader,
+                val_dataset,
+                device,
+                eval_cfg,
+            )
+            epoch_metrics.update(val_metrics)
+            mlflow.log_metrics(epoch_metrics, step=epoch + 1)
 
-            print(f"End of Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
-            training_results["epochs_completed"] = epoch + 1
-            training_results["final_loss"] = avg_loss
-            
-            # Track best loss
-            if avg_loss < training_results["best_loss"]:
-                training_results["best_loss"] = avg_loss
+            if "val_F1_op" in val_metrics:
+                if val_metrics["val_F1_op"] > best_val_f1_op:
+                    best_val_f1_op = val_metrics["val_F1_op"]
+                    torch.save({
+                        'epoch': epoch,
+                        'run_id': current_run_id,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'config': cfg,
+                        'best_val_F1_op': best_val_f1_op,
+                    }, best_ckpt_path)
+                    print(f"🏆 Updated best model: {best_ckpt_path}")
+            if "val_loss" in val_metrics:
+                best_val_loss = min(best_val_loss, val_metrics["val_loss"])
 
-            # Save Checkpoint at specified interval
-            if (epoch + 1) % save_every == 0:
-                ckpt_path = str(checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pt")
+            print(
+                f"End of Epoch {epoch+1} | "
+                f"Train Loss: {avg_loss:.4f} | "
+                f"Val Loss: {val_metrics.get('val_loss', float('nan')):.4f} | "
+                f"Val F1(op): {val_metrics.get('val_F1_op', float('nan')):.4f}"
+            )
+
+            # --- 8. Periodic Checkpointing ---
+            if save_every > 0 and (epoch + 1) % save_every == 0:
+                ckpt_path = os.path.join(checkpoint_dir, f"crepe_yolo_epoch_{epoch+1}.pt")
                 torch.save({
                     'epoch': epoch,
+                    'run_id': current_run_id, # CRITICAL: Saves the run ID so charts connect
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': avg_loss,
-                    'config': cfg
+                    'config': cfg,
                 }, ckpt_path)
                 
-                # Log checkpoint to MLflow
-                mlflow.log_artifact(ckpt_path, artifact_path="checkpoints")
-                training_results["checkpoint_path"] = ckpt_path
-                print(f"Saved and logged checkpoint: {ckpt_path}")
-        
-        # Log final artifacts
-        mlflow.log_artifact(str(run_dir / "resolved_config.yaml"), artifact_path="config")
+                mlflow.log_artifact(ckpt_path)
+                print(f"💾 Saved checkpoint to {ckpt_path}")
 
-    print("\n=== Training Complete ===")
-    print(f"Total Epochs: {training_results['epochs_completed']}")
-    print(f"Final Loss: {training_results['final_loss']:.4f}")
-    print(f"Best Loss: {training_results['best_loss']:.4f}")
-    print(f"Checkpoints saved to: {checkpoint_dir}")
-    
-    return training_results
+        if best_val_f1_op != float("-inf"):
+            mlflow.log_metric("best_val_F1_op", best_val_f1_op)
+            if os.path.exists(best_ckpt_path):
+                mlflow.log_artifact(best_ckpt_path)
+        if best_val_loss != float("inf"):
+            mlflow.log_metric("best_val_loss", best_val_loss)
 
+    print("--- Training Complete ---")
 
 if __name__ == "__main__":
-    # For standalone execution (not recommended; use run_train.py instead)
-    raise RuntimeError("Please use scripts/run_train.py to launch training with proper config.")
+    parser = argparse.ArgumentParser(description="Train or Resume CREPE-YOLO")
+    parser.add_argument('--resume', action='store_true', help="Try to resume from the latest checkpoint if it exists")
+    parser.add_argument('--config', type=str, default=None, help="Optional YAML config path.")
+    args = parser.parse_args()
+
+    cfg = load_yaml(args.config) if args.config else None
+    train(cfg=cfg, resume=args.resume)

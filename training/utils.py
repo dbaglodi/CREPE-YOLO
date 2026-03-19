@@ -7,14 +7,19 @@ import yaml
 import numpy as np
 
 def get_train_test_split(stems, test_size=0.2, seed=42):
-    """Deterministically splits stems into train and test sets."""
-    sorted_stems = sorted(stems) 
+    """Deterministically splits stems while keeping augmented items out of test."""
+    original_stems = [stem for stem in stems if '_aug_' not in stem]
+    augmented_stems = [stem for stem in stems if '_aug_' in stem]
+
+    sorted_stems = sorted(original_stems)
     rng = random.Random(seed)
     rng.shuffle(sorted_stems)
     
     split_idx = int(len(sorted_stems) * (1 - test_size))
     train_stems = sorted_stems[:split_idx]
     test_stems = sorted_stems[split_idx:]
+
+    train_stems.extend(augmented_stems)
     
     return train_stems, test_stems
 
@@ -74,6 +79,9 @@ def music_yolo_collate_fn(batch):
 
 def decode_predictions(predictions, anchors, conf_threshold=0.5, nms_iou_threshold=0.4):
     """Decodes raw YOLO predictions, applies confidence thresholding, and runs NMS."""
+    if isinstance(anchors, list):
+        anchors = torch.tensor(anchors, device=predictions.device, dtype=predictions.dtype)
+
     B, C, H, T = predictions.shape
     num_anchors = len(anchors)
     device = predictions.device

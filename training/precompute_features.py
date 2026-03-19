@@ -133,7 +133,7 @@ class CREPEFeatureExtractor:
 
 def main():
     print(">>> [PHASE 1] Entering Main Loop...")
-    processed_dir = Path('./processed/itm_flute')
+    processed_dir = Path('./data/processed/itm_flute')
     raw_audio_dir = Path('GT-ITM-Flute-99/audio')
     
     if not processed_dir.exists():
