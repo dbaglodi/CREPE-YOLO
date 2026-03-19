@@ -5,12 +5,11 @@ import itertools
 from pathlib import Path
 import subprocess
 import sys
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from training.utils import load_yaml, save_yaml
 
 
 def resolve_config_path(config_path: str) -> Path:
@@ -20,12 +19,55 @@ def resolve_config_path(config_path: str) -> Path:
     return PROJECT_ROOT / config_path
 
 
+def load_yaml(config_path: Path) -> dict:
+    with config_path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def save_yaml(config_path: Path, config: dict) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, default_flow_style=False, sort_keys=False)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-config", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="generated_sweeps")
     parser.add_argument("--submit", action="store_true", help="Submit the generated sweep as a SLURM array.")
     parser.add_argument("--array-limit", type=int, default=8, help="Maximum concurrent array tasks.")
+    parser.add_argument(
+        "--learning-rates",
+        type=float,
+        nargs="+",
+        default=[1e-3, 5e-4, 3e-4],
+        help="Learning rates to sweep.",
+    )
+    parser.add_argument(
+        "--batch-sizes",
+        type=int,
+        nargs="+",
+        default=[4, 8],
+        help="Batch sizes to sweep. Defaults avoid the bs16 OOMs seen on the current setup.",
+    )
+    parser.add_argument(
+        "--weight-decays",
+        type=float,
+        nargs="+",
+        default=[0.0, 5e-5, 1e-4],
+        help="Weight decays to sweep.",
+    )
+    parser.add_argument(
+        "--grad-clips",
+        type=float,
+        nargs="+",
+        default=[3.0, 5.0],
+        help="Gradient clipping values to sweep.",
+    )
+    parser.add_argument("--train-size", type=float, default=0.64)
+    parser.add_argument("--val-size", type=float, default=0.16)
+    parser.add_argument("--test-size", type=float, default=0.20)
+    parser.add_argument("--save-every", type=int, default=5)
     return parser.parse_args()
 
 
@@ -35,25 +77,31 @@ def main() -> None:
     out_dir = resolve_config_path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    base_cfg = load_yaml(str(base_config_path))
+    base_cfg = load_yaml(base_config_path)
 
-    learning_rates = [1e-3, 5e-4, 3e-4]
-    batch_sizes = [4, 8, 16]
-    weight_decays = [0.0, 5e-5, 1e-4]
-    grad_clips = [3.0, 5.0]
+    learning_rates = args.learning_rates
+    batch_sizes = args.batch_sizes
+    weight_decays = args.weight_decays
+    grad_clips = args.grad_clips
 
     generated = []
 
     for lr, bs, wd, gc in itertools.product(learning_rates, batch_sizes, weight_decays, grad_clips):
-        cfg = load_yaml(str(base_config_path))
+        cfg = load_yaml(base_config_path)
         cfg["optim"]["lr"] = lr
         cfg["optim"]["weight_decay"] = wd
         cfg["data"]["batch_size"] = bs
+        cfg["data"]["train_size"] = args.train_size
+        cfg["data"]["val_size"] = args.val_size
+        cfg["data"]["test_size"] = args.test_size
+        cfg["data"]["combine_val_to_train"] = False
+        cfg["data"]["train_set_usage"] = 1.0
         cfg["train"]["grad_clip"] = gc
+        cfg["train"]["save_every"] = args.save_every
         cfg["run_name"] = f"sweep_lr{lr}_bs{bs}_wd{wd}_gc{gc}".replace(".", "p")
 
         config_path = out_dir / f"{cfg['run_name']}.yaml"
-        save_yaml(str(config_path), cfg)
+        save_yaml(config_path, cfg)
         generated.append(config_path)
 
     manifest_path = out_dir / "configs.txt"

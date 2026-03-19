@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from training.dataset import MusicNoteDataset
 from training.model import DualStreamMusicYOLO
-from training.utils import decode_predictions, boxes_to_midi_notes, get_train_test_split, load_yaml
+from training.utils import decode_predictions, boxes_to_midi_notes, get_train_val_test_split, load_yaml
 
 def notes_to_mir_arrays(notes):
     """Converts note dicts to NumPy arrays for mir_eval processing."""
@@ -99,7 +99,16 @@ def main():
     
     anchors = torch.tensor([[0.0026, 0.0139],[0.0062, 0.0139],[0.0153, 0.0139]], device=device)
     all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
-    _, test_stems = get_train_test_split(all_stems, test_size=0.2, seed=42)
+    data_cfg = cfg.get("data", {})
+    _, _, test_stems = get_train_val_test_split(
+        all_stems,
+        train_size=data_cfg.get("train_size", 0.64),
+        val_size=data_cfg.get("val_size", 0.16),
+        test_size=data_cfg.get("test_size", 0.20),
+        combine_val_to_train=False,
+        train_set_usage=1.0,
+        seed=cfg.get("seed", 42),
+    )
     dataset = MusicNoteDataset(processed_dir=processed_dir, stems=test_stems)
 
     # 1. Inference Pass (Cached)

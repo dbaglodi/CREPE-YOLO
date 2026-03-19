@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH -J crepe_sweep
+#SBATCH -J crepe_sweep_a40
 #SBATCH -N 1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A100:1
 #SBATCH --mem=24GB
 #SBATCH --cpus-per-task=4
-#SBATCH -t 02:00:00
+#SBATCH -t 06:00:00
 #SBATCH -o logs/%x_%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=lalexeyev3@gatech.edu
@@ -13,6 +13,7 @@
 set -euo pipefail
 
 MANIFEST_PATH="${1:?Usage: sbatch scripts/slurm_sweep.sh <manifest-path>}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 module load anaconda3
 

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import mlflow
 
@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from training.dataset import MusicNoteDataset
 from training.model import DualStreamMusicYOLO
 from training.loss import MusicYOLOLoss
-from training.utils import load_yaml, music_yolo_collate_fn, get_train_test_split
+from training.utils import load_yaml, music_yolo_collate_fn, get_train_val_test_split
 
 def get_latest_checkpoint(checkpoint_dir):
     """Finds the checkpoint file with the highest epoch number in the directory."""
@@ -41,9 +41,15 @@ def get_latest_checkpoint(checkpoint_dir):
     return max(epochs, key=lambda x: x[0])[1]
 
 
-def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg):
-    """Run validation loss and MIR-style metrics on the held-out split."""
-    if len(val_dataset) == 0:
+def build_eval_subset(dataset, max_items):
+    if max_items is None or max_items <= 0 or len(dataset) <= max_items:
+        return dataset
+    return Subset(dataset, range(max_items))
+
+
+def evaluate_split(model, loss_fn, dataloader, dataset, device, eval_cfg, prefix):
+    """Run loss and MIR-style metrics on a dataset split."""
+    if len(dataset) == 0:
         return {}
 
     model.eval()
@@ -53,7 +59,7 @@ def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg
     num_batches = 0
 
     with torch.no_grad():
-        for batch in val_dataloader:
+        for batch in dataloader:
             targets = batch['targets'].to(device)
             features = {k: v.to(device) for k, v in batch['features'].items()}
             predictions = model(
@@ -69,9 +75,9 @@ def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg
             num_batches += 1
 
     metrics = {
-        "val_loss": total_loss / num_batches,
-        "val_loss_objectness": total_obj / num_batches,
-        "val_loss_box_coord": total_box / num_batches,
+        f"{prefix}_loss": total_loss / num_batches,
+        f"{prefix}_loss_objectness": total_obj / num_batches,
+        f"{prefix}_loss_box_coord": total_box / num_batches,
     }
 
     from training.evaluate import run_full_metrics
@@ -82,8 +88,8 @@ def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg
     prediction_cache = []
 
     with torch.no_grad():
-        for i in range(len(val_dataset)):
-            item = val_dataset[i]
+        for i in range(len(dataset)):
+            item = dataset[i]
             features = {k: v.to(device) for k, v in item['features'].items()}
             if features['posteriorgram'].dim() == 3:
                 features['posteriorgram'] = features['posteriorgram'].unsqueeze(1)
@@ -98,19 +104,19 @@ def run_validation(model, loss_fn, val_dataloader, val_dataset, device, eval_cfg
 
     mir_metrics = run_full_metrics(
         prediction_cache,
-        val_dataset,
+        dataset,
         anchors,
         conf_threshold,
         nms_iou_threshold,
     )
     metrics.update({
-        "val_P": mir_metrics["P"],
-        "val_R": mir_metrics["R"],
-        "val_F1": mir_metrics["F1"],
-        "val_AOR": mir_metrics["AOR"],
-        "val_P_op": mir_metrics["P_op"],
-        "val_R_op": mir_metrics["R_op"],
-        "val_F1_op": mir_metrics["F1_op"],
+        f"{prefix}_P": mir_metrics["P"],
+        f"{prefix}_R": mir_metrics["R"],
+        f"{prefix}_F1": mir_metrics["F1"],
+        f"{prefix}_AOR": mir_metrics["AOR"],
+        f"{prefix}_P_op": mir_metrics["P_op"],
+        f"{prefix}_R_op": mir_metrics["R_op"],
+        f"{prefix}_F1_op": mir_metrics["F1_op"],
     })
     return metrics
 
@@ -155,12 +161,17 @@ def train(cfg: dict | None = None, resume: bool = False):
     processed_dir = data_cfg.get("processed_dir", 'data/processed/itm_flute')
     batch_size = data_cfg.get("batch_size", 4)
     num_workers = data_cfg.get("num_workers", 0)
-    test_size = data_cfg.get("test_size", 0.2)
+    train_size = data_cfg.get("train_size", 0.64)
+    val_size = data_cfg.get("val_size", 0.16)
+    test_size = data_cfg.get("test_size", 0.20)
+    combine_val_to_train = data_cfg.get("combine_val_to_train", False)
+    train_set_usage = data_cfg.get("train_set_usage", 1.0)
     num_epochs = train_cfg.get("epochs", 150)
     learning_rate = optim_cfg.get("lr", 1e-4)
     weight_decay = optim_cfg.get("weight_decay", 1e-4)
     grad_clip = train_cfg.get("grad_clip", 5.0)
     save_every = train_cfg.get("save_every", 10)
+    train_metrics_max_samples = train_cfg.get("train_metrics_max_samples", 32)
     num_anchors = model_cfg.get("num_anchors", 3)
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -172,8 +183,23 @@ def train(cfg: dict | None = None, resume: bool = False):
         raise FileNotFoundError(f"Data directory {processed_dir} not found. Run preprocess_dataset.py and precompute_features.py first.")
         
     all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
-    train_stems, val_stems = get_train_test_split(all_stems, test_size=test_size, seed=cfg.get("seed", 42))
-    print(f"Dataset Split: {len(train_stems)} training | {len(val_stems)} validation")
+    train_stems, val_stems, test_stems = get_train_val_test_split(
+        all_stems,
+        train_size=train_size,
+        val_size=val_size,
+        test_size=test_size,
+        combine_val_to_train=combine_val_to_train,
+        train_set_usage=train_set_usage,
+        seed=cfg.get("seed", 42),
+    )
+    print(
+        f"Dataset Split: {len(train_stems)} training | "
+        f"{len(val_stems)} validation | {len(test_stems)} test"
+    )
+    print(
+        f"Split Mode: combine_val_to_train={combine_val_to_train} | "
+        f"train_set_usage={train_set_usage:.2f}"
+    )
 
     train_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)
     dataloader = DataLoader(
@@ -186,6 +212,22 @@ def train(cfg: dict | None = None, resume: bool = False):
     val_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=val_stems)
     val_dataloader = DataLoader(
         val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=music_yolo_collate_fn,
+        num_workers=num_workers,
+    )
+    test_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=test_stems)
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=music_yolo_collate_fn,
+        num_workers=num_workers,
+    )
+    train_metric_dataset = build_eval_subset(train_dataset, train_metrics_max_samples)
+    train_metric_dataloader = DataLoader(
+        train_metric_dataset,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=music_yolo_collate_fn,
@@ -242,8 +284,29 @@ def train(cfg: dict | None = None, resume: bool = False):
                 "num_anchors": num_anchors,
                 "train_samples": len(train_stems),
                 "val_samples": len(val_stems),
+                "test_samples": len(test_stems),
+                "train_size": train_size,
+                "val_size": val_size,
+                "test_size": test_size,
+                "combine_val_to_train": combine_val_to_train,
+                "train_set_usage": train_set_usage,
+                "train_metrics_max_samples": min(train_metrics_max_samples, len(train_dataset)),
                 "device": str(device)
             })
+        print(f"Checkpoint directory: {checkpoint_dir}")
+
+        best_test_f1_op = float("-inf")
+        best_test_ckpt_path = os.path.join(checkpoint_dir, "best_test_f1_op.pt")
+        split_metadata = {
+            "train_samples": len(train_stems),
+            "val_samples": len(val_stems),
+            "test_samples": len(test_stems),
+            "train_size": train_size,
+            "val_size": val_size,
+            "test_size": test_size,
+            "combine_val_to_train": combine_val_to_train,
+            "train_set_usage": train_set_usage,
+        }
 
         # --- 7. Main Training Loop ---
         for epoch in range(start_epoch, num_epochs):
@@ -291,37 +354,77 @@ def train(cfg: dict | None = None, resume: bool = False):
                 "loss_objectness": epoch_obj_loss / len(dataloader),
                 "loss_box_coord": epoch_box_loss / len(dataloader)
             }
-            val_metrics = run_validation(
+            train_metrics = evaluate_split(
+                model,
+                loss_fn,
+                train_metric_dataloader,
+                train_metric_dataset,
+                device,
+                eval_cfg,
+                "train_eval",
+            )
+            val_metrics = evaluate_split(
                 model,
                 loss_fn,
                 val_dataloader,
                 val_dataset,
                 device,
                 eval_cfg,
+                "val",
             )
+            test_metrics = evaluate_split(
+                model,
+                loss_fn,
+                test_dataloader,
+                test_dataset,
+                device,
+                eval_cfg,
+                "test",
+            )
+            epoch_metrics.update(train_metrics)
             epoch_metrics.update(val_metrics)
+            epoch_metrics.update(test_metrics)
             mlflow.log_metrics(epoch_metrics, step=epoch + 1)
 
-            if "val_F1_op" in val_metrics:
-                if val_metrics["val_F1_op"] > best_val_f1_op:
-                    best_val_f1_op = val_metrics["val_F1_op"]
-                    torch.save({
-                        'epoch': epoch,
-                        'run_id': current_run_id,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'config': cfg,
-                        'best_val_F1_op': best_val_f1_op,
-                    }, best_ckpt_path)
-                    print(f"🏆 Updated best model: {best_ckpt_path}")
+            if "val_F1_op" in val_metrics and val_metrics["val_F1_op"] > best_val_f1_op:
+                best_val_f1_op = val_metrics["val_F1_op"]
+                torch.save({
+                    'epoch': epoch,
+                    'run_id': current_run_id,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'config': cfg,
+                    'split_metadata': split_metadata,
+                    'best_val_F1_op': best_val_f1_op,
+                    'test_F1_op_at_best_val': test_metrics.get("test_F1_op"),
+                }, best_ckpt_path)
+                print(f"🏆 Updated best validation model: {best_ckpt_path}")
+
+            if "test_F1_op" in test_metrics and test_metrics["test_F1_op"] > best_test_f1_op:
+                best_test_f1_op = test_metrics["test_F1_op"]
+                torch.save({
+                    'epoch': epoch,
+                    'run_id': current_run_id,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'config': cfg,
+                    'split_metadata': split_metadata,
+                    'best_test_F1_op': best_test_f1_op,
+                    'val_F1_op_at_best_test': val_metrics.get("val_F1_op"),
+                }, best_test_ckpt_path)
+                print(f"🧪 Updated best test model: {best_test_ckpt_path}")
+
             if "val_loss" in val_metrics:
                 best_val_loss = min(best_val_loss, val_metrics["val_loss"])
 
             print(
                 f"End of Epoch {epoch+1} | "
                 f"Train Loss: {avg_loss:.4f} | "
+                f"Train Eval F1(op): {train_metrics.get('train_eval_F1_op', float('nan')):.4f} | "
                 f"Val Loss: {val_metrics.get('val_loss', float('nan')):.4f} | "
-                f"Val F1(op): {val_metrics.get('val_F1_op', float('nan')):.4f}"
+                f"Val F1(op): {val_metrics.get('val_F1_op', float('nan')):.4f} | "
+                f"Test Loss: {test_metrics.get('test_loss', float('nan')):.4f} | "
+                f"Test F1(op): {test_metrics.get('test_F1_op', float('nan')):.4f}"
             )
 
             # --- 8. Periodic Checkpointing ---
@@ -333,6 +436,7 @@ def train(cfg: dict | None = None, resume: bool = False):
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'config': cfg,
+                    'split_metadata': split_metadata,
                 }, ckpt_path)
                 
                 mlflow.log_artifact(ckpt_path)
@@ -342,6 +446,10 @@ def train(cfg: dict | None = None, resume: bool = False):
             mlflow.log_metric("best_val_F1_op", best_val_f1_op)
             if os.path.exists(best_ckpt_path):
                 mlflow.log_artifact(best_ckpt_path)
+        if best_test_f1_op != float("-inf"):
+            mlflow.log_metric("best_test_F1_op", best_test_f1_op)
+            if os.path.exists(best_test_ckpt_path):
+                mlflow.log_artifact(best_test_ckpt_path)
         if best_val_loss != float("inf"):
             mlflow.log_metric("best_val_loss", best_val_loss)
 

@@ -1,4 +1,3 @@
-# utils.py
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -6,22 +5,70 @@ import random
 import yaml
 import numpy as np
 
-def get_train_test_split(stems, test_size=0.2, seed=42):
-    """Deterministically splits stems while keeping augmented items out of test."""
+# def get_train_test_split(stems, test_size=0.2, seed=42):
+#     """Deterministically splits stems while keeping augmented items out of test."""
+#     original_stems = [stem for stem in stems if '_aug_' not in stem]
+#     augmented_stems = [stem for stem in stems if '_aug_' in stem]
+
+#     sorted_stems = sorted(original_stems)
+#     rng = random.Random(seed)
+#     rng.shuffle(sorted_stems)
+    
+#     split_idx = int(len(sorted_stems) * (1 - test_size))
+#     train_stems = sorted_stems[:split_idx]
+#     test_stems = sorted_stems[split_idx:]
+
+#     train_stems.extend(augmented_stems)
+    
+#     return train_stems, test_stems
+
+def get_train_val_test_split(
+    stems,
+    train_size=0.64,
+    val_size=0.16,
+    test_size=0.20,
+    combine_val_to_train=False,
+    train_set_usage=1.0,
+    seed=42,
+):
+    """
+    Deterministically splits stems into train, val, and test.
+    Guarantees the Test set is mathematically identical to the previous 80/20 split.
+    """
+    assert abs(train_size + val_size + test_size - 1.0) < 1e-5, "Split sizes must sum to 1.0"
+    assert 0.0 < train_set_usage <= 1.0, "train_set_usage must be in (0, 1]"
+
     original_stems = [stem for stem in stems if '_aug_' not in stem]
     augmented_stems = [stem for stem in stems if '_aug_' in stem]
-
     sorted_stems = sorted(original_stems)
     rng = random.Random(seed)
     rng.shuffle(sorted_stems)
-    
-    split_idx = int(len(sorted_stems) * (1 - test_size))
-    train_stems = sorted_stems[:split_idx]
-    test_stems = sorted_stems[split_idx:]
 
-    train_stems.extend(augmented_stems)
-    
-    return train_stems, test_stems
+    test_split_idx = int(len(sorted_stems) * (1 - test_size))
+    test_stems = sorted_stems[test_split_idx:]
+
+    if combine_val_to_train:
+        train_stems = sorted_stems[:test_split_idx]
+        val_stems = []
+    else:
+        val_split_idx = int(len(sorted_stems) * train_size)
+        train_stems = sorted_stems[:val_split_idx]
+        val_stems = sorted_stems[val_split_idx:test_split_idx]
+
+    train_stems_set = set(train_stems)
+    val_stems_set = set(val_stems)
+    final_train = list(train_stems)
+    final_val = list(val_stems)
+
+    for aug_stem in augmented_stems:
+        base_stem = aug_stem.split('_aug_')[0]
+        if base_stem in train_stems_set:
+            final_train.append(aug_stem)
+        elif base_stem in val_stems_set:
+            continue
+
+    final_train = final_train[:int(len(final_train) * train_set_usage)]
+    return final_train, final_val, test_stems
 
 def music_yolo_collate_fn(batch):
     """Pads variable-length features and targets for batching."""

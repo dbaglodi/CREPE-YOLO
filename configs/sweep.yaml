@@ -6,7 +6,11 @@ data:
   processed_dir: data/processed/itm_flute
   batch_size: 4
   num_workers: 0
-  test_size: 0.2
+  train_size: 0.64
+  val_size: 0.16
+  test_size: 0.20
+  combine_val_to_train: false
+  train_set_usage: 1.0
 
 model:
   num_anchors: 3
@@ -20,7 +24,8 @@ train:
   epochs: 20
   device: cuda
   grad_clip: 5.0
-  save_every: 0
+  save_every: 5
+  train_metrics_max_samples: 32
 
 mlflow:
   tracking_uri: file:./mlruns
