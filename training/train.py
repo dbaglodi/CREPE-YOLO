@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from training.dataset import MusicNoteDataset
 from training.model import DualStreamMusicYOLO
 from training.loss import MusicYOLOLoss
-from training.utils import load_yaml, music_yolo_collate_fn, get_train_test_split
+from training.utils import load_yaml, music_yolo_collate_fn, get_train_val_test_split
 
 def get_latest_checkpoint(checkpoint_dir):
     """Finds the checkpoint file with the highest epoch number in the directory."""
@@ -172,7 +172,10 @@ def train(cfg: dict | None = None, resume: bool = False):
         raise FileNotFoundError(f"Data directory {processed_dir} not found. Run preprocess_dataset.py and precompute_features.py first.")
         
     all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
-    train_stems, val_stems = get_train_test_split(all_stems, test_size=test_size, seed=cfg.get("seed", 42))
+    # train_stems, val_stems = get_train_test_split(all_stems, test_size=test_size, seed=cfg.get("seed", 42))
+    # TODO: Paremetrize for tuning loop combine_val_to_train (false for hyperparameter tuning), train_set_usage (1.0 for hyperparameter tuning), train_size=0.6 (always), val_size=0.2 (always)
+    # TODO: New train loop with fixed hyperparameters from tuning run, with combine_val_to_train (true), train_set_usage (0.1, 0.2, 0.3, ..., 1.0)
+    train_stems, val_stems = get_train_val_test_split(all_stems, combine_val_to_train=False, train_set_usage=0.1, seed=cfg.get("seed", 42))
     print(f"Dataset Split: {len(train_stems)} training | {len(val_stems)} validation")
 
     train_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)

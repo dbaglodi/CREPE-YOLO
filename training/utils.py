@@ -6,22 +6,81 @@ import random
 import yaml
 import numpy as np
 
-def get_train_test_split(stems, test_size=0.2, seed=42):
-    """Deterministically splits stems while keeping augmented items out of test."""
+# def get_train_test_split(stems, test_size=0.2, seed=42):
+#     """Deterministically splits stems while keeping augmented items out of test."""
+#     original_stems = [stem for stem in stems if '_aug_' not in stem]
+#     augmented_stems = [stem for stem in stems if '_aug_' in stem]
+
+#     sorted_stems = sorted(original_stems)
+#     rng = random.Random(seed)
+#     rng.shuffle(sorted_stems)
+    
+#     split_idx = int(len(sorted_stems) * (1 - test_size))
+#     train_stems = sorted_stems[:split_idx]
+#     test_stems = sorted_stems[split_idx:]
+
+#     train_stems.extend(augmented_stems)
+    
+#     return train_stems, test_stems
+
+def get_train_val_test_split(stems, train_size=0.6, val_size=0.2, test_size=0.2, combine_val_to_train=False, train_set_usage = 1.0, seed=42):
+    """
+    Deterministically splits stems into train, val, and test.
+    Guarantees the Test set is mathematically identical to the previous 80/20 split.
+    """
+    # Safety check to ensure percentages make sense
+    assert abs(train_size + val_size + test_size - 1.0) < 1e-5, "Split sizes must sum to 1.0"
+    
+    # Separate originals and augmented
     original_stems = [stem for stem in stems if '_aug_' not in stem]
     augmented_stems = [stem for stem in stems if '_aug_' in stem]
 
+    # Shuffle only the originals to maintain the exact same sequence as before
     sorted_stems = sorted(original_stems)
     rng = random.Random(seed)
     rng.shuffle(sorted_stems)
     
-    split_idx = int(len(sorted_stems) * (1 - test_size))
-    train_stems = sorted_stems[:split_idx]
-    test_stems = sorted_stems[split_idx:]
-
-    train_stems.extend(augmented_stems)
+    # 1. Isolate the Test Set EXACTLY how it was done before (the last 20%)
+    test_split_idx = int(len(sorted_stems) * (1 - test_size))
+    test_stems = sorted_stems[test_split_idx:]
     
-    return train_stems, test_stems
+    # 2. Split the remaining 80% into Train and Val
+    if combine_val_to_train:
+        # Final Run Mode: The entire front 80% becomes the training set
+        train_stems = sorted_stems[:test_split_idx]
+        val_stems = []
+    else:
+        # Tuning Mode: Split the front 80% into 60% Train, 20% Val
+        val_split_idx = int(len(sorted_stems) * train_size)
+        train_stems = sorted_stems[:val_split_idx]
+        val_stems = sorted_stems[val_split_idx:test_split_idx]
+
+    # 3. Route the augmented files safely
+    train_stems_set = set(train_stems)
+    val_stems_set = set(val_stems)
+    
+    final_train = list(train_stems)
+    final_val = list(val_stems)
+    
+    for aug_stem in augmented_stems:
+        # Extract the base name (e.g., "AhSurely_aug_pitch_2" -> "AhSurely")
+        base_stem = aug_stem.split('_aug_')[0]
+        
+        if base_stem in train_stems_set:
+            final_train.append(aug_stem)
+        elif base_stem in val_stems_set:
+            # We explicitly ignore augmented versions of validation stems.
+            # A validation set should only ever test on true, unaltered audio.
+            pass
+
+    final_train = final_train[:int(len(final_train) * train_set_usage)]
+
+    if combine_val_to_train:
+        ret = (final_train, test_stems)
+    else:
+        ret = (final_train, final_val)
+
+    return ret
 
 def music_yolo_collate_fn(batch):
     """Pads variable-length features and targets for batching."""
