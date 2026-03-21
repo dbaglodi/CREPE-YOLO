@@ -6,6 +6,7 @@ outputs/
 checkpoints/
 logs/*.out
 logs/*.err
+saved_visuals/
 
 # Data storage
 data/processed/
