@@ -121,6 +121,11 @@ def parse_log(path: Path) -> dict:
         "status": status,
         "checkpoint_dir": checkpoint_dir,
         "best_checkpoint_path": best_checkpoint_path,
+                "resolved_config_path": (
+            str(Path(checkpoint_dir).parent / "resolved_config.yaml")
+            if checkpoint_dir
+            else None
+        ),
         "best_epoch": best_epoch_metrics["epoch"] if best_epoch_metrics else None,
         "best_val_f1_op": best_val_f1,
         "test_f1_op_at_best_val": best_test_f1,
@@ -164,6 +169,8 @@ def main() -> None:
         print(f"Validation F1(op): {best['best_val_f1_op']:.4f} at epoch {best['best_epoch']}")
         if best["test_f1_op_at_best_val"] is not None:
             print(f"Corresponding test F1(op): {best['test_f1_op_at_best_val']:.4f}")
+        if best["resolved_config_path"]:
+            print(f"Recommended config for retraining YAML: {best['resolved_config_path']}")
         if best["best_checkpoint_path"]:
             print(f"Recommended config for retraining checkpoint: {best['best_checkpoint_path']}")
 
