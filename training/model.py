@@ -35,7 +35,7 @@ class SemanticBranch(nn.Module):
     Branch B: CRNN processing the 1D semantic state.
     Downsamples Time by 32, applies BiLSTM, and forces a 64-channel bottleneck.
     """
-    def __init__(self, in_dim=2050, hidden_dim=128, out_channels=64):
+    def __init__(self, in_dim=2051, hidden_dim=128, out_channels=64): 
         super().__init__()
         # Input: (B, 2050, T)
         
@@ -118,7 +118,7 @@ class DualStreamMusicYOLO(nn.Module):
         self.semantic_branch = SemanticBranch()
         self.head = MusicYOLOHead(in_channels=576, num_anchors=num_anchors)
 
-    def forward(self, posteriorgram, embedding, confidence, gradient):
+    def forward(self, posteriorgram, embedding, confidence, gradient, raw_shape):
         """
         Inputs:
             posteriorgram: (B, 1, 360, T)
@@ -141,7 +141,7 @@ class DualStreamMusicYOLO(nn.Module):
         feat_a = self.visual_branch(visual_input) # -> (B, 512, 11, T/32)
         
         # 3. Prepare and Process Semantic Branch
-        semantic_input = torch.cat([embedding, confidence, gradient], dim=1) # -> (B, 2050, T)
+        semantic_input = torch.cat([embedding, confidence, gradient, raw_shape], dim=1) # -> (B, 2051, T)
         feat_b = self.semantic_branch(semantic_input) # -> (B, 64, 1, T/32)
         
         # 4. Tiling & Fusion

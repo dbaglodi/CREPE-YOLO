@@ -124,11 +124,17 @@ class CREPEFeatureExtractor:
         frequency = 10 * 2 ** (cents / 1200)
         gradient = np.abs(np.gradient(frequency))
         
+        rms = librosa.feature.rms(y=audio, frame_length=1024, hop_length=hop_length)
+        rms = rms[:, :n_frames] 
+        if rms.max() > 0:
+            rms = rms / rms.max()
+
         return {
             'posteriorgram': activation.T[np.newaxis, :, :],       
             'embedding': embedding.T[np.newaxis, :, :],            
             'confidence': confidence.reshape(1, 1, -1),            
-            'gradient': gradient.reshape(1, 1, -1)                 
+            'gradient': gradient.reshape(1, 1, -1),
+            'raw_shape': rms.reshape(1, 1, -1)
         }
 
 def main():

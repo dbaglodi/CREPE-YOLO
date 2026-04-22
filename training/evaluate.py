@@ -120,7 +120,7 @@ def main():
             features = {k: v.to(device) for k, v in item['features'].items()}
             if features['posteriorgram'].dim() == 3:
                 features['posteriorgram'] = features['posteriorgram'].unsqueeze(1)
-            prediction_cache.append(model(features['posteriorgram'], features['embedding'], features['confidence'], features['gradient']))
+            prediction_cache.append(model(features['posteriorgram'], features['embedding'], features['confidence'], features['gradient'], features['raw_shape']))
 
     # 2. Threshold Determination
     best_conf, best_nms = 0.4, 0.4 # Baseline defaults

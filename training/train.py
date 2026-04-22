@@ -67,6 +67,7 @@ def evaluate_split(model, loss_fn, dataloader, dataset, device, eval_cfg, prefix
                 features['embedding'],
                 features['confidence'],
                 features['gradient'],
+                features['raw_shape']
             )
             loss_dict = loss_fn(predictions, targets)
             total_loss += loss_dict['total_loss'].item()
@@ -327,7 +328,8 @@ def train(cfg: dict | None = None, resume: bool = False):
                     features['posteriorgram'], 
                     features['embedding'], 
                     features['confidence'], 
-                    features['gradient']
+                    features['gradient'],
+                    features['raw_shape']
                 )
 
                 loss_dict = loss_fn(predictions, targets)
