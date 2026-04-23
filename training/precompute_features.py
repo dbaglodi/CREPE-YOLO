@@ -133,7 +133,7 @@ class CREPEFeatureExtractor:
 
 def main():
     print(">>> [PHASE 1] Entering Main Loop...")
-    processed_dir = Path('./data/processed/itm_flute')
+    processed_dir = Path('./data/processed/combined_data')
     raw_audio_dir = Path('GT-ITM-Flute-99/audio')
     
     if not processed_dir.exists():
@@ -144,26 +144,22 @@ def main():
     
     extractor = CREPEFeatureExtractor(model_capacity='full', step_size=10)
     
+    # Inside Phase 1 of precompute_features.py:
     for stem in tqdm(stems, desc="Extracting Audio Features"):
         stem_dir = processed_dir / stem
         npz_path = stem_dir / 'features.npz'
         pt_path = stem_dir / 'features.pt'
-        
         audio_path_processed = stem_dir / 'audio_16k.wav'
-        audio_path_raw = raw_audio_dir / f"{stem}.wav"
         
         if pt_path.exists() or npz_path.exists():
             continue
             
-        if audio_path_processed.exists():
-            target_audio = audio_path_processed
-        elif audio_path_raw.exists():
-            target_audio = audio_path_raw
-        else:
+        if not audio_path_processed.exists():
+            print(f"  [WARN] Missing audio_16k.wav for {stem}")
             continue
             
         try:
-            features_np = extractor.extract_features_numpy(str(target_audio))
+            features_np = extractor.extract_features_numpy(str(audio_path_processed))
             np.savez(npz_path, **features_np)
         except Exception as e:
             print(f"\n[ERROR] Failed on {stem}: {e}")

@@ -28,47 +28,65 @@ def get_train_val_test_split(
     val_size=0.16,
     test_size=0.20,
     combine_val_to_train=False,
-    train_set_usage=1.0,
+    test_participant_id="5", 
     seed=42,
 ):
     """
     Deterministically splits stems into train, val, and test.
-    Guarantees the Test set is mathematically identical to the previous 80/20 split.
+    Safely handles augmented data to prevent test-set leakage.
+    Guarantees a specific Filosax participant is quarantined into the Test Set.
     """
-    assert abs(train_size + val_size + test_size - 1.0) < 1e-5, "Split sizes must sum to 1.0"
-    assert 0.0 < train_set_usage <= 1.0, "train_set_usage must be in (0, 1]"
+    assert abs(train_size + val_size + test_size - 1.0) < 1e-6, "Splits must sum to 1.0"
+    
+    # 1. Separate ITM (can be split randomly) from Filosax (needs stratification)
+    itm_original = sorted([s for s in stems if s.startswith('itm_') and '_aug_' not in s])
+    itm_augmented = sorted([s for s in stems if s.startswith('itm_') and '_aug_' in s])
+    
+    filo_test = sorted([s for s in stems if s.startswith('filo_') and f"filo_p{test_participant_id}_" in s])
+    filo_remaining = sorted([s for s in stems if s.startswith('filo_') and f"filo_p{test_participant_id}_" not in s])
 
-    original_stems = [stem for stem in stems if '_aug_' not in stem]
-    augmented_stems = [stem for stem in stems if '_aug_' in stem]
-    sorted_stems = sorted(original_stems)
     rng = random.Random(seed)
-    rng.shuffle(sorted_stems)
+    
+    # 2. Split the randomizable ITM data (Originals only)
+    rng.shuffle(itm_original)
+    itm_total = len(itm_original)
+    
+    itm_train_end = int(itm_total * train_size)
+    itm_val_end = itm_train_end + int(itm_total * val_size)
+    
+    train_stems = itm_original[:itm_train_end]
+    val_stems = itm_original[itm_train_end:itm_val_end]
+    test_stems = itm_original[itm_val_end:]
+    
+    # --- THE LEAKAGE FIX ---
+    # Convert train list to a fast-lookup set
+    train_bases = set(train_stems)
+    valid_train_augs = []
+    
+    for aug_stem in itm_augmented:
+        # Extract the parent name (e.g., 'itm_123_aug_pitch' -> 'itm_123')
+        parent_name = aug_stem.split('_aug_')[0]
+        # Only include the augmentation if the parent is in the training set
+        if parent_name in train_bases:
+            valid_train_augs.append(aug_stem)
+            
+    train_stems.extend(valid_train_augs)
+    # -----------------------
+    
+    # 3. Stratify the Filosax Data
+    test_stems.extend(filo_test)
+    
+    rng.shuffle(filo_remaining)
+    filo_split_idx = int(len(filo_remaining) * (train_size / (train_size + val_size)))
+    train_stems.extend(filo_remaining[:filo_split_idx])
+    val_stems.extend(filo_remaining[filo_split_idx:])
 
-    test_split_idx = int(len(sorted_stems) * (1 - test_size))
-    test_stems = sorted_stems[test_split_idx:]
-
+    # 4. Optional combination
     if combine_val_to_train:
-        train_stems = sorted_stems[:test_split_idx]
+        train_stems.extend(val_stems)
         val_stems = []
-    else:
-        val_split_idx = int(len(sorted_stems) * train_size)
-        train_stems = sorted_stems[:val_split_idx]
-        val_stems = sorted_stems[val_split_idx:test_split_idx]
-
-    train_stems_set = set(train_stems)
-    val_stems_set = set(val_stems)
-    final_train = list(train_stems)
-    final_val = list(val_stems)
-
-    for aug_stem in augmented_stems:
-        base_stem = aug_stem.split('_aug_')[0]
-        if base_stem in train_stems_set:
-            final_train.append(aug_stem)
-        elif base_stem in val_stems_set:
-            continue
-
-    final_train = final_train[:int(len(final_train) * train_set_usage)]
-    return final_train, final_val, test_stems
+        
+    return train_stems, val_stems, test_stems
 
 def music_yolo_collate_fn(batch):
     """Pads variable-length features and targets for batching."""
