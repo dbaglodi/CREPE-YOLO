@@ -59,7 +59,7 @@ for i, (file_name, title) in enumerate(zip(files, titles)):
     axes[i].legend(frameon=True, shadow=True)
 
 # Main figure title
-plt.suptitle('DualStreamMusicYOLO Metrics: Training and Validation Comparison', 
+plt.suptitle('DualStreamMusicYOLOX Metrics: Training and Validation Comparison', 
              fontsize=18, fontweight='bold', y=1.02)
 
 plt.tight_layout()

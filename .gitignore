@@ -9,7 +9,7 @@ logs/*.err
 saved_visuals/
 
 # Data storage
-data/processed/
+data/
 GT-ITM-Flute-99*
 
 # Python cache

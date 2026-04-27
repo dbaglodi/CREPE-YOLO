@@ -1,5 +1,5 @@
 seed: 42
-run_name: crepe_yolo_sweep_base
+run_name: crepe_yolox_sweep_base
 output_root: outputs
 
 data:
@@ -13,7 +13,9 @@ data:
   train_set_usage: 1.0
 
 model:
-  num_anchors: 3
+  yolox:
+    lambda_coord: 5.0
+    lambda_noobj: 0.5
 
 optim:
   name: adamw
@@ -29,7 +31,7 @@ train:
 
 mlflow:
   tracking_uri: file:./mlruns
-  experiment_name: CREPE-YOLO-Sweep
+  experiment_name: CREPE-YOLOX-Sweep
 
 eval:
   conf_threshold: 0.4

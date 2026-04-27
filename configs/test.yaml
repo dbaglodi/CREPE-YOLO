@@ -1,5 +1,5 @@
 seed: 42
-run_name: test_dry_run
+run_name: test_yolox_dry_run
 output_root: outputs
 
 # Data configuration (same as base but for quick testing)
@@ -11,7 +11,9 @@ data:
 
 # Model configuration
 model:
-  num_anchors: 3
+  yolox:
+    lambda_coord: 5.0
+    lambda_noobj: 0.5
 
 # Optimizer configuration
 optim:
@@ -29,7 +31,7 @@ train:
 # MLflow configuration
 mlflow:
   tracking_uri: file:./mlruns
-  experiment_name: CREPE-YOLO-Testing
+  experiment_name: CREPE-YOLOX-Testing
 
 # Evaluation configuration
 eval:

@@ -15,19 +15,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from training.dataset import MusicNoteDataset
-from training.model import DualStreamMusicYOLO
-from training.loss import MusicYOLOLoss
-from training.utils import load_yaml, music_yolo_collate_fn, get_train_val_test_split
+from training.model import DualStreamMusicYOLOX
+from training.loss import build_loss
+from training.utils import load_yaml, music_yolox_collate_fn, get_train_val_test_split
 
 def get_latest_checkpoint(checkpoint_dir):
     """Finds the checkpoint file with the highest epoch number in the directory."""
     if not os.path.exists(checkpoint_dir):
         return None
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "crepe_yolo_epoch_*.pt"))
+    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "crepe_yolox_epoch_*.pt"))
     if not checkpoint_files:
         return None
     
-    # Extract epoch numbers using regex: 'crepe_yolo_epoch_50.pt' -> 50
+    # Extract epoch numbers using regex: 'crepe_yolox_epoch_50.pt' -> 50
     epochs = []
     for f in checkpoint_files:
         match = re.search(r'epoch_(\d+).pt', f)
@@ -82,7 +82,6 @@ def evaluate_split(model, loss_fn, dataloader, dataset, device, eval_cfg, prefix
 
     from training.evaluate import run_full_metrics
 
-    anchors = loss_fn.anchors.detach().to(device)
     conf_threshold = eval_cfg.get("conf_threshold", 0.4)
     nms_iou_threshold = eval_cfg.get("nms_iou_threshold", 0.4)
     prediction_cache = []
@@ -105,9 +104,8 @@ def evaluate_split(model, loss_fn, dataloader, dataset, device, eval_cfg, prefix
     mir_metrics = run_full_metrics(
         prediction_cache,
         dataset,
-        anchors,
-        conf_threshold,
-        nms_iou_threshold,
+        conf=conf_threshold,
+        nms=nms_iou_threshold,
     )
     metrics.update({
         f"{prefix}_P": mir_metrics["P"],
@@ -172,7 +170,7 @@ def train(cfg: dict | None = None, resume: bool = False):
     grad_clip = train_cfg.get("grad_clip", 5.0)
     save_every = train_cfg.get("save_every", 10)
     train_metrics_max_samples = train_cfg.get("train_metrics_max_samples", 32)
-    num_anchors = model_cfg.get("num_anchors", 3)
+    yolox_cfg = model_cfg.get("yolox", {})
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Processed data directory: {processed_dir}")
@@ -206,7 +204,7 @@ def train(cfg: dict | None = None, resume: bool = False):
         train_dataset,
         batch_size=batch_size, 
         shuffle=True, 
-        collate_fn=music_yolo_collate_fn,
+        collate_fn=music_yolox_collate_fn,
         num_workers=num_workers
     )
     val_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=val_stems)
@@ -214,7 +212,7 @@ def train(cfg: dict | None = None, resume: bool = False):
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=music_yolo_collate_fn,
+        collate_fn=music_yolox_collate_fn,
         num_workers=num_workers,
     )
     test_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=test_stems)
@@ -222,7 +220,7 @@ def train(cfg: dict | None = None, resume: bool = False):
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=music_yolo_collate_fn,
+        collate_fn=music_yolox_collate_fn,
         num_workers=num_workers,
     )
     train_metric_dataset = build_eval_subset(train_dataset, train_metrics_max_samples)
@@ -230,13 +228,13 @@ def train(cfg: dict | None = None, resume: bool = False):
         train_metric_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=music_yolo_collate_fn,
+        collate_fn=music_yolox_collate_fn,
         num_workers=num_workers,
     )
 
     # --- 4. Model & Optimizer Initialization ---
-    model = DualStreamMusicYOLO(num_anchors=num_anchors).to(device)
-    loss_fn = MusicYOLOLoss(num_anchors=num_anchors).to(device)
+    model = DualStreamMusicYOLOX().to(device)
+    loss_fn = build_loss(yolox_cfg=yolox_cfg).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     # --- 5. Resume Logic (Weights + MLflow Run ID) ---
@@ -260,7 +258,7 @@ def train(cfg: dict | None = None, resume: bool = False):
 
     # --- 6. MLflow Tracking ---
     mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri", "file:./mlruns"))
-    mlflow.set_experiment(mlflow_cfg.get("experiment_name", "CREPE-YOLO-Transcription"))
+    mlflow.set_experiment(mlflow_cfg.get("experiment_name", "CREPE-YOLOX-Transcription"))
     
     # If active_run_id is None, a new run starts. If it exists, it re-opens the old one.
     with mlflow.start_run(run_id=active_run_id) as run:
@@ -281,7 +279,6 @@ def train(cfg: dict | None = None, resume: bool = False):
                 "weight_decay": weight_decay,
                 "grad_clip": grad_clip,
                 "save_every": save_every,
-                "num_anchors": num_anchors,
                 "train_samples": len(train_stems),
                 "val_samples": len(val_stems),
                 "test_samples": len(test_stems),
@@ -293,6 +290,8 @@ def train(cfg: dict | None = None, resume: bool = False):
                 "train_metrics_max_samples": min(train_metrics_max_samples, len(train_dataset)),
                 "device": str(device)
             })
+            for key, value in yolox_cfg.items():
+                mlflow.log_param(f"yolox_{key}", value)
         print(f"Checkpoint directory: {checkpoint_dir}")
 
         best_test_f1_op = float("-inf")
@@ -429,7 +428,7 @@ def train(cfg: dict | None = None, resume: bool = False):
 
             # --- 8. Periodic Checkpointing ---
             if save_every > 0 and (epoch + 1) % save_every == 0:
-                ckpt_path = os.path.join(checkpoint_dir, f"crepe_yolo_epoch_{epoch+1}.pt")
+                ckpt_path = os.path.join(checkpoint_dir, f"crepe_yolox_epoch_{epoch+1}.pt")
                 torch.save({
                     'epoch': epoch,
                     'run_id': current_run_id, # CRITICAL: Saves the run ID so charts connect
@@ -456,7 +455,7 @@ def train(cfg: dict | None = None, resume: bool = False):
     print("--- Training Complete ---")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train or Resume CREPE-YOLO")
+    parser = argparse.ArgumentParser(description="Train or Resume CREPE-YOLOX")
     parser.add_argument('--resume', action='store_true', help="Try to resume from the latest checkpoint if it exists")
     parser.add_argument('--config', type=str, default=None, help="Optional YAML config path.")
     args = parser.parse_args()
