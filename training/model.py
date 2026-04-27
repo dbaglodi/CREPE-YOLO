@@ -91,7 +91,7 @@ class MusicYOLOHead(nn.Module):
     """
     Detection head for predicting note bounding boxes.
     """
-    def __init__(self, in_channels=576, num_anchors=3):
+    def __init__(self, in_channels=577, num_anchors=3):
         super().__init__()
         # Note: We output 5 values per anchor (obj_conf, x, y, w, h). 
         # If you add multi-instrument classification later, this becomes num_anchors * (5 + num_classes)
@@ -115,8 +115,8 @@ class DualStreamMusicYOLO(nn.Module):
     def __init__(self, num_anchors=3):
         super().__init__()
         self.visual_branch = VisualBranch()
-        self.semantic_branch = SemanticBranch()
-        self.head = MusicYOLOHead(in_channels=576, num_anchors=num_anchors)
+        self.semantic_branch = SemanticBranch(in_dim=2050)
+        self.head = MusicYOLOHead(in_channels=577, num_anchors=num_anchors)
 
     def forward(self, posteriorgram, embedding, confidence, gradient, raw_shape):
         """
@@ -141,15 +141,22 @@ class DualStreamMusicYOLO(nn.Module):
         feat_a = self.visual_branch(visual_input) # -> (B, 512, 11, T/32)
         
         # 3. Prepare and Process Semantic Branch
-        semantic_input = torch.cat([embedding, confidence, gradient, raw_shape], dim=1) # -> (B, 2051, T)
+        semantic_input = torch.cat([embedding, confidence, gradient], dim=1) # -> (B, 2051, T)
         feat_b = self.semantic_branch(semantic_input) # -> (B, 64, 1, T/32)
         
         # 4. Tiling & Fusion
         # Tile Branch B's output vertically to match Branch A's height (11)
         target_h = feat_a.shape[2]
         feat_b_tiled = feat_b.repeat(1, 1, target_h, 1) # -> (B, 64, 11, T/32)
+
+        # Downsample raw_shape (T) to match the feature map time dimension (T/32)
+        target_t = feat_a.shape[-1]
+        raw_shape_downsampled = torch.nn.functional.adaptive_avg_pool1d(raw_shape, output_size=target_t) # -> (B, 1, T/32)
+
+        # Tile it vertically to match the height (11)
+        raw_shape_tiled = raw_shape_downsampled.unsqueeze(2).repeat(1, 1, target_h, 1) # -> (B, 1, 11, T/32)
         
-        fused_features = torch.cat([feat_a, feat_b_tiled], dim=1) # -> (B, 576, 11, T/32)
+        fused_features = torch.cat([feat_a, feat_b_tiled, raw_shape_tiled], dim=1) # -> (B, 577, 11, T/32)
         
         # 5. YOLO Detection Head
         predictions = self.head(fused_features) # -> (B, 15, 11, T/32)
