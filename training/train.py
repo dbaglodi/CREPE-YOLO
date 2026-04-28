@@ -261,6 +261,7 @@ def train(cfg: dict | None = None, resume: bool = False):
         
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         active_run_id = checkpoint.get('run_id') # Retrieve the original MLflow run ID
         print(f"✅ Successfully loaded. Restarting at Epoch {start_epoch}")
@@ -446,6 +447,7 @@ def train(cfg: dict | None = None, resume: bool = False):
                     'run_id': current_run_id, # CRITICAL: Saves the run ID so charts connect
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'shceduler_state_dict': scheduler.state_dict(),
                     'config': cfg,
                     'split_metadata': split_metadata,
                 }, ckpt_path)
