@@ -100,6 +100,7 @@ def evaluate_split(model, loss_fn, dataloader, dataset, device, eval_cfg, prefix
                     features['embedding'],
                     features['confidence'],
                     features['gradient'],
+                    features['raw_shape']
                 )
             )
 

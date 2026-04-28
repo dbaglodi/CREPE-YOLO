@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from training.utils import get_train_test_split
+from training.utils import get_train_val_test_split
 
 def augment_annotation(txt_path, out_path, new_filename_ref, pitch_steps=0, stretch_rate=1.0):
     """Parses the specific ITM Flute .txt format and mathematically shifts the labels."""
@@ -77,7 +77,7 @@ def augment_dataset():
                  if f.endswith('.wav') and '_aug_' not in f]
                  
     # Run the seeded split so we only augment the training set
-    train_stems, test_stems = get_train_test_split(all_stems, test_size=0.2, seed=42)
+    train_stems, val_stems, test_stems = get_train_val_test_split(all_stems, train_size=0.64, val_size=0.16, test_size=0.2, seed=42)
     
     print(f"Total Stems Found: {len(all_stems)}")
     print(f"Training Stems to Augment: {len(train_stems)}")
