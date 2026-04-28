@@ -17,7 +17,7 @@ def run_pytorch_conversion():
     import numpy as np
     from tqdm import tqdm
     
-    processed_dir = Path('./data/processed/itm_flute')
+    processed_dir = Path('./data/processed/combined_data')
     stems = [d.name for d in processed_dir.iterdir() if d.is_dir()]
     downsample_factor = 32
     
@@ -31,8 +31,19 @@ def run_pytorch_conversion():
         if not npz_path.exists() or pt_path.exists():
             continue
             
-        data = np.load(npz_path)
-        features_np = {k: data[k] for k in data.files}
+        if not npz_path.exists() or pt_path.exists():
+            continue
+            
+        try:
+            data = np.load(npz_path)
+            # Force NumPy to actually read the zip contents right now
+            features_np = {k: data[k] for k in data.files}
+        except Exception as e:
+            print(f"\n[WARNING] Corrupted NPZ file found for {stem}: {e}")
+            print(f"Deleting {npz_path.name} so it can be cleanly regenerated.")
+            npz_path.unlink(missing_ok=True)
+            continue # Skip to the next stem
+        
         features_t = {k: torch.tensor(v, dtype=torch.float32) for k, v in features_np.items()}
         
         if features_t['gradient'].max() > 0:

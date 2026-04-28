@@ -28,6 +28,7 @@ def get_train_val_test_split(
     val_size=0.16,
     test_size=0.20,
     combine_val_to_train=False,
+    train_set_usage=1.0,
     test_participant_id="5", 
     seed=42,
 ):
@@ -37,6 +38,7 @@ def get_train_val_test_split(
     Guarantees a specific Filosax participant is quarantined into the Test Set.
     """
     assert abs(train_size + val_size + test_size - 1.0) < 1e-6, "Splits must sum to 1.0"
+    assert 0.0 < train_set_usage <= 1.0, "train_set_usage must be in (0, 1]"
     
     # 1. Separate ITM (can be split randomly) from Filosax (needs stratification)
     itm_original = sorted([s for s in stems if s.startswith('itm_') and '_aug_' not in s])
@@ -86,7 +88,8 @@ def get_train_val_test_split(
         train_stems.extend(val_stems)
         val_stems = []
         
-    return train_stems, val_stems, test_stems
+    final_train = train_stems[:int(len(train_stems) * train_set_usage)]
+    return final_train, val_stems, test_stems
 
 def music_yolo_collate_fn(batch):
     """Pads variable-length features and targets for batching."""

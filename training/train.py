@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
+from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 import mlflow
 
@@ -239,6 +240,15 @@ def train(cfg: dict | None = None, resume: bool = False):
     loss_fn = MusicYOLOLoss(num_anchors=num_anchors).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+    # OneCycleLR automatically handles the warmup ramp-up, then the cosine decay down
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=1e-4, 
+        epochs=num_epochs,
+        steps_per_epoch=len(dataloader),
+        pct_start=0.05 # Dedicate the first 5% of training to the Warmup Phase
+    )
+
     # --- 5. Resume Logic (Weights + MLflow Run ID) ---
     start_epoch = 0
     active_run_id = None
@@ -336,6 +346,7 @@ def train(cfg: dict | None = None, resume: bool = False):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 optimizer.step()
+                scheduler.step()
 
                 # Metrics Tracking
                 epoch_loss += loss.item()
