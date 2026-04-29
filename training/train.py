@@ -8,8 +8,11 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import OneCycleLR
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
 from tqdm import tqdm
 import mlflow
+import math
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from training.dataset import MusicNoteDataset
 from training.model import DualStreamMusicYOLO
 from training.loss import MusicYOLOLoss
-from training.utils import load_yaml, music_yolo_collate_fn, get_train_val_test_split
+from training.utils import load_yaml, music_yolo_collate_fn, get_train_val_test_split, get_stratified_eval_stems
 
 def get_latest_checkpoint(checkpoint_dir):
     """Finds the checkpoint file with the highest epoch number in the directory."""
@@ -160,7 +163,7 @@ def train(cfg: dict | None = None, resume: bool = False):
     run_name = cfg.get("run_name", "legacy_run")
     checkpoint_dir = os.path.join(output_root, run_name, "checkpoints")
     processed_dir = data_cfg.get("processed_dir", 'data/processed/itm_flute')
-    batch_size = data_cfg.get("batch_size", 4)
+    effective_batch_size = data_cfg.get("batch_size", 4)
     num_workers = data_cfg.get("num_workers", 0)
     train_size = data_cfg.get("train_size", 0.64)
     val_size = data_cfg.get("val_size", 0.16)
@@ -174,6 +177,12 @@ def train(cfg: dict | None = None, resume: bool = False):
     save_every = train_cfg.get("save_every", 10)
     train_metrics_max_samples = train_cfg.get("train_metrics_max_samples", 32)
     num_anchors = model_cfg.get("num_anchors", 3)
+
+    # Limit for A100 40gb without crashing OOM
+    physical_batch_size = 2
+    accumulation_steps = max(1, effective_batch_size // physical_batch_size)
+
+    print(f"Batch Sizing -> Effective: {effective_batch_size} | Physical: {physical_batch_size} | Accumulation Steps: {accumulation_steps}")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Processed data directory: {processed_dir}")
@@ -205,7 +214,7 @@ def train(cfg: dict | None = None, resume: bool = False):
     train_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_stems)
     dataloader = DataLoader(
         train_dataset,
-        batch_size=batch_size, 
+        batch_size=physical_batch_size, 
         shuffle=True, 
         collate_fn=music_yolo_collate_fn,
         num_workers=num_workers
@@ -213,7 +222,7 @@ def train(cfg: dict | None = None, resume: bool = False):
     val_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=val_stems)
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=physical_batch_size,
         shuffle=False,
         collate_fn=music_yolo_collate_fn,
         num_workers=num_workers,
@@ -221,15 +230,18 @@ def train(cfg: dict | None = None, resume: bool = False):
     test_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=test_stems)
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
+        batch_size=physical_batch_size,
         shuffle=False,
         collate_fn=music_yolo_collate_fn,
         num_workers=num_workers,
     )
-    train_metric_dataset = build_eval_subset(train_dataset, train_metrics_max_samples)
+    # Pass the training stems through the new stratifier
+    train_metric_stems = get_stratified_eval_stems(train_stems, train_metrics_max_samples)
+    # Create a fresh dataset using only those specific 64 stems
+    train_metric_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=train_metric_stems)
     train_metric_dataloader = DataLoader(
         train_metric_dataset,
-        batch_size=batch_size,
+        batch_size=physical_batch_size,
         shuffle=False,
         collate_fn=music_yolo_collate_fn,
         num_workers=num_workers,
@@ -240,12 +252,14 @@ def train(cfg: dict | None = None, resume: bool = False):
     loss_fn = MusicYOLOLoss(num_anchors=num_anchors).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+    effective_steps_per_epoch = math.ceil(len(dataloader) / accumulation_steps)
+
     # OneCycleLR automatically handles the warmup ramp-up, then the cosine decay down
     scheduler = OneCycleLR(
         optimizer,
         max_lr=1e-4, 
         epochs=num_epochs,
-        steps_per_epoch=len(dataloader),
+        steps_per_epoch=effective_steps_per_epoch,
         pct_start=0.05 # Dedicate the first 5% of training to the Warmup Phase
     )
 
@@ -286,7 +300,7 @@ def train(cfg: dict | None = None, resume: bool = False):
             mlflow.log_params({
                 "run_name": run_name,
                 "processed_dir": processed_dir,
-                "batch_size": batch_size,
+                "batch_size": effective_batch_size,
                 "learning_rate": learning_rate,
                 "num_epochs": num_epochs,
                 "weight_decay": weight_decay,
@@ -319,6 +333,10 @@ def train(cfg: dict | None = None, resume: bool = False):
             "train_set_usage": train_set_usage,
         }
 
+        # Initialize AMP Scaler
+        use_amp = device.type == 'cuda'
+        scaler = GradScaler('cuda', enabled=use_amp)
+
         # --- 7. Main Training Loop ---
         for epoch in range(start_epoch, num_epochs):
             model.train()
@@ -327,35 +345,48 @@ def train(cfg: dict | None = None, resume: bool = False):
             epoch_box_loss = 0.0
 
             progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+
+            optimizer.zero_grad()
             
-            for batch in progress_bar:
+            for idx, batch in enumerate(progress_bar):
                 targets = batch['targets'].to(device)
                 features = {k: v.to(device) for k, v in batch['features'].items()}
 
-                optimizer.zero_grad()
+                with autocast(device_type='cuda', enabled=use_amp, dtype=torch.float16):
+                    predictions = model(
+                        features['posteriorgram'], 
+                        features['embedding'], 
+                        features['confidence'], 
+                        features['gradient']
+                    )
 
-                predictions = model(
-                    features['posteriorgram'], 
-                    features['embedding'], 
-                    features['confidence'], 
-                    features['gradient']
-                )
+                    loss_dict = loss_fn(predictions, targets)
+                    raw_loss = loss_dict['total_loss']
 
-                loss_dict = loss_fn(predictions, targets)
-                loss = loss_dict['total_loss']
-
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                optimizer.step()
-                scheduler.step()
+                    # Scale loss for backpropagation
+                    scaled_loss = raw_loss / accumulation_steps
 
                 # Metrics Tracking
-                epoch_loss += loss.item()
+                epoch_loss += raw_loss.item()
                 epoch_obj_loss += loss_dict['loss_obj'].item()
                 epoch_box_loss += loss_dict['loss_box'].item()
 
+                # Gradient flow
+                scaler.scale(scaled_loss).backward()
+
+                # Only step the optimizer when we hit the effective batch size 
+                #    (or on the very last physical batch of the epoch)
+                if (idx + 1) % accumulation_steps == 0 or (idx + 1) == len(dataloader):
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    scheduler.step()
+                    # Clear gradients for the next effective batch
+                    optimizer.zero_grad()
+
                 progress_bar.set_postfix({
-                    'Loss': f"{loss.item():.2f}", 
+                    'Loss': f"{raw_loss.item():.2f}", 
                     'Obj': f"{loss_dict['loss_obj'].item():.2f}"
                 })
 
@@ -447,7 +478,7 @@ def train(cfg: dict | None = None, resume: bool = False):
                     'run_id': current_run_id, # CRITICAL: Saves the run ID so charts connect
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'shceduler_state_dict': scheduler.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
                     'config': cfg,
                     'split_metadata': split_metadata,
                 }, ckpt_path)

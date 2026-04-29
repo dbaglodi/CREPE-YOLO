@@ -4,23 +4,7 @@ import torchvision
 import random
 import yaml
 import numpy as np
-
-# def get_train_test_split(stems, test_size=0.2, seed=42):
-#     """Deterministically splits stems while keeping augmented items out of test."""
-#     original_stems = [stem for stem in stems if '_aug_' not in stem]
-#     augmented_stems = [stem for stem in stems if '_aug_' in stem]
-
-#     sorted_stems = sorted(original_stems)
-#     rng = random.Random(seed)
-#     rng.shuffle(sorted_stems)
-    
-#     split_idx = int(len(sorted_stems) * (1 - test_size))
-#     train_stems = sorted_stems[:split_idx]
-#     test_stems = sorted_stems[split_idx:]
-
-#     train_stems.extend(augmented_stems)
-    
-#     return train_stems, test_stems
+import re
 
 def get_train_val_test_split(
     stems,
@@ -87,9 +71,51 @@ def get_train_val_test_split(
     if combine_val_to_train:
         train_stems.extend(val_stems)
         val_stems = []
-        
+
+    rng.shuffle(train_stems) # Randomness in the order during training
     final_train = train_stems[:int(len(train_stems) * train_set_usage)]
     return final_train, val_stems, test_stems
+
+def get_stratified_eval_stems(train_stems, max_items, seed=42):
+    """Proportionally samples stems across data types and individual players."""
+    if max_items is None or max_items <= 0 or len(train_stems) <= max_items:
+        return train_stems
+
+    # 1. Group stems by their granular category
+    categories = {}
+    
+    for stem in train_stems:
+        if stem.startswith('filo_'):
+            # Extract player ID (e.g., 'filo_p3_...' -> '3')
+            match = re.search(r'filo_[A-Za-z]*_?(\d+)', stem)
+            player_id = match.group(1) if match else "unknown"
+            cat_name = f'filo_player_{player_id}'
+        elif '_aug_' in stem:
+            cat_name = 'itm_aug'
+        else:
+            cat_name = 'itm_clean'
+            
+        if cat_name not in categories:
+            categories[cat_name] = []
+        categories[cat_name].append(stem)
+
+    rng = random.Random(seed)
+    subset_stems = []
+
+    # 2. Sample proportionally
+    total_stems = len(train_stems)
+    for cat, stems in categories.items():
+        if not stems: 
+            continue
+            
+        rng.shuffle(stems)
+        proportion = len(stems) / total_stems
+        num_to_sample = int(round(proportion * max_items))
+        subset_stems.extend(stems[:num_to_sample])
+
+    # 3. Handle minor rounding drift and shuffle
+    rng.shuffle(subset_stems)
+    return subset_stems[:max_items]
 
 def music_yolo_collate_fn(batch):
     """Pads variable-length features and targets for batching."""
