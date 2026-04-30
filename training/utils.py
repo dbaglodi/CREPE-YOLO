@@ -4,23 +4,7 @@ import torchvision
 import random
 import yaml
 import numpy as np
-
-# def get_train_test_split(stems, test_size=0.2, seed=42):
-#     """Deterministically splits stems while keeping augmented items out of test."""
-#     original_stems = [stem for stem in stems if '_aug_' not in stem]
-#     augmented_stems = [stem for stem in stems if '_aug_' in stem]
-
-#     sorted_stems = sorted(original_stems)
-#     rng = random.Random(seed)
-#     rng.shuffle(sorted_stems)
-    
-#     split_idx = int(len(sorted_stems) * (1 - test_size))
-#     train_stems = sorted_stems[:split_idx]
-#     test_stems = sorted_stems[split_idx:]
-
-#     train_stems.extend(augmented_stems)
-    
-#     return train_stems, test_stems
+import re
 
 def get_train_val_test_split(
     stems,
@@ -29,46 +13,109 @@ def get_train_val_test_split(
     test_size=0.20,
     combine_val_to_train=False,
     train_set_usage=1.0,
+    test_participant_id="5", 
     seed=42,
 ):
     """
     Deterministically splits stems into train, val, and test.
-    Guarantees the Test set is mathematically identical to the previous 80/20 split.
+    Safely handles augmented data to prevent test-set leakage.
+    Guarantees a specific Filosax participant is quarantined into the Test Set.
     """
-    assert abs(train_size + val_size + test_size - 1.0) < 1e-5, "Split sizes must sum to 1.0"
+    assert abs(train_size + val_size + test_size - 1.0) < 1e-6, "Splits must sum to 1.0"
     assert 0.0 < train_set_usage <= 1.0, "train_set_usage must be in (0, 1]"
+    
+    # 1. Separate ITM (can be split randomly) from Filosax (needs stratification)
+    itm_original = sorted([s for s in stems if s.startswith('itm_') and '_aug_' not in s])
+    itm_augmented = sorted([s for s in stems if s.startswith('itm_') and '_aug_' in s])
+    
+    filo_test = sorted([s for s in stems if s.startswith('filo_') and f"filo_p{test_participant_id}_" in s])
+    filo_remaining = sorted([s for s in stems if s.startswith('filo_') and f"filo_p{test_participant_id}_" not in s])
 
-    original_stems = [stem for stem in stems if '_aug_' not in stem]
-    augmented_stems = [stem for stem in stems if '_aug_' in stem]
-    sorted_stems = sorted(original_stems)
     rng = random.Random(seed)
-    rng.shuffle(sorted_stems)
+    
+    # 2. Split the randomizable ITM data (Originals only)
+    rng.shuffle(itm_original)
+    itm_total = len(itm_original)
+    
+    itm_train_end = int(itm_total * train_size)
+    itm_val_end = itm_train_end + int(itm_total * val_size)
+    
+    train_stems = itm_original[:itm_train_end]
+    val_stems = itm_original[itm_train_end:itm_val_end]
+    test_stems = itm_original[itm_val_end:]
+    
+    # --- THE LEAKAGE FIX ---
+    # Convert train list to a fast-lookup set
+    train_bases = set(train_stems)
+    valid_train_augs = []
+    
+    for aug_stem in itm_augmented:
+        # Extract the parent name (e.g., 'itm_123_aug_pitch' -> 'itm_123')
+        parent_name = aug_stem.split('_aug_')[0]
+        # Only include the augmentation if the parent is in the training set
+        if parent_name in train_bases:
+            valid_train_augs.append(aug_stem)
+            
+    train_stems.extend(valid_train_augs)
+    # -----------------------
+    
+    # 3. Stratify the Filosax Data
+    test_stems.extend(filo_test)
+    
+    rng.shuffle(filo_remaining)
+    filo_split_idx = int(len(filo_remaining) * (train_size / (train_size + val_size)))
+    train_stems.extend(filo_remaining[:filo_split_idx])
+    val_stems.extend(filo_remaining[filo_split_idx:])
 
-    test_split_idx = int(len(sorted_stems) * (1 - test_size))
-    test_stems = sorted_stems[test_split_idx:]
-
+    # 4. Optional combination
     if combine_val_to_train:
-        train_stems = sorted_stems[:test_split_idx]
+        train_stems.extend(val_stems)
         val_stems = []
-    else:
-        val_split_idx = int(len(sorted_stems) * train_size)
-        train_stems = sorted_stems[:val_split_idx]
-        val_stems = sorted_stems[val_split_idx:test_split_idx]
 
-    train_stems_set = set(train_stems)
-    val_stems_set = set(val_stems)
-    final_train = list(train_stems)
-    final_val = list(val_stems)
+    rng.shuffle(train_stems) # Randomness in the order during training
+    final_train = train_stems[:int(len(train_stems) * train_set_usage)]
+    return final_train, val_stems, test_stems
 
-    for aug_stem in augmented_stems:
-        base_stem = aug_stem.split('_aug_')[0]
-        if base_stem in train_stems_set:
-            final_train.append(aug_stem)
-        elif base_stem in val_stems_set:
+def get_stratified_eval_stems(train_stems, max_items, seed=42):
+    """Proportionally samples stems across data types and individual players."""
+    if max_items is None or max_items <= 0 or len(train_stems) <= max_items:
+        return train_stems
+
+    # 1. Group stems by their granular category
+    categories = {}
+    
+    for stem in train_stems:
+        if stem.startswith('filo_'):
+            # Extract player ID (e.g., 'filo_p3_...' -> '3')
+            match = re.search(r'filo_[A-Za-z]*_?(\d+)', stem)
+            player_id = match.group(1) if match else "unknown"
+            cat_name = f'filo_player_{player_id}'
+        elif '_aug_' in stem:
+            cat_name = 'itm_aug'
+        else:
+            cat_name = 'itm_clean'
+            
+        if cat_name not in categories:
+            categories[cat_name] = []
+        categories[cat_name].append(stem)
+
+    rng = random.Random(seed)
+    subset_stems = []
+
+    # 2. Sample proportionally
+    total_stems = len(train_stems)
+    for cat, stems in categories.items():
+        if not stems: 
             continue
+            
+        rng.shuffle(stems)
+        proportion = len(stems) / total_stems
+        num_to_sample = int(round(proportion * max_items))
+        subset_stems.extend(stems[:num_to_sample])
 
-    final_train = final_train[:int(len(final_train) * train_set_usage)]
-    return final_train, final_val, test_stems
+    # 3. Handle minor rounding drift and shuffle
+    rng.shuffle(subset_stems)
+    return subset_stems[:max_items]
 
 def music_yolo_collate_fn(batch):
     """Pads variable-length features and targets for batching."""

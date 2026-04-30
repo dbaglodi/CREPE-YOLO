@@ -3,7 +3,7 @@ run_name: crepe_yolo_sweep_base
 output_root: outputs
 
 data:
-  processed_dir: data/processed/itm_flute
+  processed_dir: data/processed/combined_data
   batch_size: 4
   num_workers: 0
   train_size: 0.64

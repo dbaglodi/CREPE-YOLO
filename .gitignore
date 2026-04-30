@@ -11,6 +11,7 @@ saved_visuals/
 # Data storage
 data/processed/
 GT-ITM-Flute-99*
+Filosax*
 
 # Python cache
 __pycache__/
