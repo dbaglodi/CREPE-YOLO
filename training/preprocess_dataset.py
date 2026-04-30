@@ -129,10 +129,10 @@ def process_filosax():
                 
             filo_notes = [] 
             for note in raw_json.get('notes', []):
-                # We use the sonic start/end times ('s_') rather than the theoretical beat times ('a_')
+                # Use Acoustic (a_) times to match the actual audio performance
                 filo_notes.append({
-                    'onset': note['s_start_time'], 
-                    'offset': note['s_end_time'], 
+                    'onset': note['a_start_time'], 
+                    'offset': note['a_end_time'], 
                     'pitch_midi': note['midi_pitch']
                 })
             
