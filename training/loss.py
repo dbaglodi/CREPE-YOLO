@@ -2,119 +2,260 @@
 import torch
 import torch.nn as nn
 
+
 class MusicYOLOLoss(nn.Module):
-    def __init__(self, num_anchors=3):
+    def __init__(
+        self,
+        num_anchors=3,
+        anchors=None,
+        lambda_coord=5.0,
+        lambda_noobj=0.5,
+    ):
         super().__init__()
         self.num_anchors = num_anchors
-        self.mse_loss = nn.MSELoss(reduction='none')
-        self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
-        
-        # TODO: Make sure to generalize, this is specific for the flute dataset from the analyze_anchors.py output
-        self.register_buffer('anchors', torch.tensor([
+        self.lambda_coord = lambda_coord
+        self.lambda_noobj = lambda_noobj
+        self.mse_loss = nn.MSELoss(reduction="none")
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction="none")
+
+        anchors = anchors or [
             [0.0026, 0.0139],
             [0.0062, 0.0139],
             [0.0153, 0.0139],
-        ]))
+        ]
+        if len(anchors) != num_anchors:
+            raise ValueError(
+                f"Expected {num_anchors} anchors, received {len(anchors)}."
+            )
+        self.register_buffer("anchors", torch.tensor(anchors, dtype=torch.float32))
 
-        # Loss weighting
-        self.lambda_coord = 5.0 # Penalize box coordinate errors heavily
-        self.lambda_noobj = 0.5 # Less penalty for empty cells to balance classes
+    def build_targets(self, targets, batch_size, height, time_steps, device):
+        obj_mask = torch.zeros(
+            batch_size,
+            self.num_anchors,
+            height,
+            time_steps,
+            device=device,
+            dtype=torch.bool,
+        )
+        noobj_mask = torch.ones(
+            batch_size,
+            self.num_anchors,
+            height,
+            time_steps,
+            device=device,
+            dtype=torch.bool,
+        )
+        tx = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+        ty = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+        tw = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+        th = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
 
-    def build_targets(self, targets, B, H, T, device):
-        """
-        Maps the continuous normalized [0, 1] ground truth targets to the exact 
-        grid cells (i, j) and assigns them to the best-fitting anchor.
-        """
-        # Create empty target tensors
-        obj_mask = torch.zeros(B, self.num_anchors, H, T, device=device, dtype=torch.bool)
-        noobj_mask = torch.ones(B, self.num_anchors, H, T, device=device, dtype=torch.bool)
-        tx = torch.zeros(B, self.num_anchors, H, T, device=device)
-        ty = torch.zeros(B, self.num_anchors, H, T, device=device)
-        tw = torch.zeros(B, self.num_anchors, H, T, device=device)
-        th = torch.zeros(B, self.num_anchors, H, T, device=device)
-
-        for b in range(B):
-            batch_targets = targets[b]
-            # Filter out the padding (-1.0) we added in the collate_fn
+        for batch_idx in range(batch_size):
+            batch_targets = targets[batch_idx]
             valid_targets = batch_targets[batch_targets[:, 0] != -1]
-            
+
             for target in valid_targets:
-                _, gx, gy, gw, gh = target # Class, x, y, w, h
-                
-                # Scale coordinates to the feature map grid size (H, T)
-                gi = int(gx * T)
-                gj = int(gy * H)
-                
-                # Clamp to prevent out-of-bounds indexing
-                gi = max(0, min(gi, T - 1))
-                gj = max(0, min(gj, H - 1))
-                
-                # Find the anchor that best matches the ground truth width
-                # (Since height is basically constant for notes, we just match width)
-                anchor_ious = torch.abs(self.anchors[:, 0] - gw)
-                best_n = torch.argmin(anchor_ious)
-                
-                # Assign to masks
-                obj_mask[b, best_n, gj, gi] = True
-                noobj_mask[b, best_n, gj, gi] = False
-                
-                # Calculate the exact regression targets
-                # Offset from the top-left of the grid cell
-                tx[b, best_n, gj, gi] = (gx * T) - gi
-                ty[b, best_n, gj, gi] = (gy * H) - gj
-                
-                # Log scale for width and height relative to the anchor
-                tw[b, best_n, gj, gi] = torch.log(gw / self.anchors[best_n, 0] + 1e-16)
-                th[b, best_n, gj, gi] = torch.log(gh / self.anchors[best_n, 1] + 1e-16)
+                _, gx, gy, gw, gh = target
+
+                grid_x = int(gx * time_steps)
+                grid_y = int(gy * height)
+                grid_x = max(0, min(grid_x, time_steps - 1))
+                grid_y = max(0, min(grid_y, height - 1))
+
+                anchor_diffs = torch.abs(self.anchors[:, 0] - gw)
+                best_anchor = torch.argmin(anchor_diffs)
+
+                obj_mask[batch_idx, best_anchor, grid_y, grid_x] = True
+                noobj_mask[batch_idx, best_anchor, grid_y, grid_x] = False
+                tx[batch_idx, best_anchor, grid_y, grid_x] = (gx * time_steps) - grid_x
+                ty[batch_idx, best_anchor, grid_y, grid_x] = (gy * height) - grid_y
+                tw[batch_idx, best_anchor, grid_y, grid_x] = torch.log(
+                    gw / self.anchors[best_anchor, 0] + 1e-16
+                )
+                th[batch_idx, best_anchor, grid_y, grid_x] = torch.log(
+                    gh / self.anchors[best_anchor, 1] + 1e-16
+                )
 
         return obj_mask, noobj_mask, tx, ty, tw, th
 
     def forward(self, predictions, targets):
-        """
-        predictions: (B, anchors * 5, H, T)
-        targets: (B, max_notes, 5)
-        """
-        B, C, H, T = predictions.shape
+        batch_size, channels, height, time_steps = predictions.shape
+        expected_channels = self.num_anchors * 5
+        if channels != expected_channels:
+            raise ValueError(
+                f"YOLO predictions must have {expected_channels} channels, received {channels}"
+            )
+
         device = predictions.device
-        
-        # Reshape predictions to separate anchors and coordinate values
-        # Shape: (B, anchors, 5, H, T)
-        predictions = predictions.view(B, self.num_anchors, 5, H, T)
-        
-        # Split into coordinates and objectness scores
-        pred_x = torch.sigmoid(predictions[..., 0, :, :]) # Sigmoid forces between 0-1 (offset in cell)
-        pred_y = torch.sigmoid(predictions[..., 1, :, :])
-        pred_w = predictions[..., 2, :, :]
-        pred_h = predictions[..., 3, :, :]
-        pred_obj = predictions[..., 4, :, :] # Raw logits for BCE loss
-        
-        # Build targets
-        obj_mask, noobj_mask, tx, ty, tw, th = self.build_targets(targets, B, H, T, device)
-        
-        # --- 1. Objectness Loss (Is there a note here?) ---
-        # BCE with Logits for numerical stability
+        predictions = predictions.view(
+            batch_size,
+            self.num_anchors,
+            5,
+            height,
+            time_steps,
+        )
+
+        pred_x = torch.sigmoid(predictions[:, :, 0, :, :])
+        pred_y = torch.sigmoid(predictions[:, :, 1, :, :])
+        pred_w = predictions[:, :, 2, :, :]
+        pred_h = predictions[:, :, 3, :, :]
+        pred_obj = predictions[:, :, 4, :, :]
+
+        obj_mask, noobj_mask, tx, ty, tw, th = self.build_targets(
+            targets,
+            batch_size,
+            height,
+            time_steps,
+            device,
+        )
+
         loss_obj_real = self.bce_loss(pred_obj[obj_mask], torch.ones_like(pred_obj[obj_mask]))
-        loss_obj_fake = self.bce_loss(pred_obj[noobj_mask], torch.zeros_like(pred_obj[noobj_mask]))
-        
+        loss_obj_fake = self.bce_loss(
+            pred_obj[noobj_mask],
+            torch.zeros_like(pred_obj[noobj_mask]),
+        )
         loss_obj = loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()
-        
-        # --- 2. Coordinate Loss (How accurate is the bounding box?) ---
-        # We only calculate coordinate loss if a note actually exists in that cell (obj_mask)
+
         loss_x = self.mse_loss(pred_x[obj_mask], tx[obj_mask]).sum()
         loss_y = self.mse_loss(pred_y[obj_mask], ty[obj_mask]).sum()
         loss_w = self.mse_loss(pred_w[obj_mask], tw[obj_mask]).sum()
         loss_h = self.mse_loss(pred_h[obj_mask], th[obj_mask]).sum()
-        
         loss_box = self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)
-        
-        # Total Loss
-        total_loss = loss_obj + loss_box
-        
-        # Normalize by batch size to keep learning rate stable
-        total_loss = total_loss / B
-        
+
+        total_loss = (loss_obj + loss_box) / batch_size
         return {
-            'total_loss': total_loss,
-            'loss_obj': loss_obj / B,
-            'loss_box': loss_box / B
+            "total_loss": total_loss,
+            "loss_obj": loss_obj / batch_size,
+            "loss_box": loss_box / batch_size,
         }
+
+    def get_decode_config(self, device):
+        return {
+            "anchors": self.anchors.detach().to(device),
+        }
+
+
+class MusicYOLOXLoss(nn.Module):
+    def __init__(self, lambda_coord=5.0, lambda_noobj=0.5):
+        super().__init__()
+        self.lambda_coord = lambda_coord
+        self.lambda_noobj = lambda_noobj
+        self.mse_loss = nn.MSELoss(reduction="none")
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction="none")
+
+    def build_targets(self, targets, batch_size, height, time_steps, device):
+        """
+        Assign each note to the cell containing its center and keep at most one
+        positive per cell. When multiple notes land on the same cell, retain the
+        larger note box as the target for that location.
+        """
+        obj_mask = torch.zeros(batch_size, height, time_steps, device=device, dtype=torch.bool)
+        noobj_mask = torch.ones(batch_size, height, time_steps, device=device, dtype=torch.bool)
+        tx = torch.zeros(batch_size, height, time_steps, device=device)
+        ty = torch.zeros(batch_size, height, time_steps, device=device)
+        tw = torch.zeros(batch_size, height, time_steps, device=device)
+        th = torch.zeros(batch_size, height, time_steps, device=device)
+        best_area = torch.full((batch_size, height, time_steps), -1.0, device=device)
+
+        for batch_idx in range(batch_size):
+            batch_targets = targets[batch_idx]
+            valid_targets = batch_targets[batch_targets[:, 0] != -1]
+
+            for target in valid_targets:
+                _, gx, gy, gw, gh = target
+
+                grid_x = int(gx * time_steps)
+                grid_y = int(gy * height)
+                grid_x = max(0, min(grid_x, time_steps - 1))
+                grid_y = max(0, min(grid_y, height - 1))
+
+                area = gw * gh
+                if area <= best_area[batch_idx, grid_y, grid_x]:
+                    continue
+
+                best_area[batch_idx, grid_y, grid_x] = area
+                obj_mask[batch_idx, grid_y, grid_x] = True
+                noobj_mask[batch_idx, grid_y, grid_x] = False
+                tx[batch_idx, grid_y, grid_x] = (gx * time_steps) - grid_x
+                ty[batch_idx, grid_y, grid_x] = (gy * height) - grid_y
+                tw[batch_idx, grid_y, grid_x] = gw
+                th[batch_idx, grid_y, grid_x] = gh
+
+        return obj_mask, noobj_mask, tx, ty, tw, th
+
+    def forward(self, predictions, targets):
+        batch_size, channels, height, time_steps = predictions.shape
+        if channels != 5:
+            raise ValueError(
+                f"YOLOX predictions must have 5 channels, received {channels}"
+            )
+
+        device = predictions.device
+        pred_x = torch.sigmoid(predictions[:, 0, :, :])
+        pred_y = torch.sigmoid(predictions[:, 1, :, :])
+        pred_w = torch.sigmoid(predictions[:, 2, :, :])
+        pred_h = torch.sigmoid(predictions[:, 3, :, :])
+        pred_obj = predictions[:, 4, :, :]
+
+        obj_mask, noobj_mask, tx, ty, tw, th = self.build_targets(
+            targets,
+            batch_size,
+            height,
+            time_steps,
+            device,
+        )
+
+        loss_obj_real = self.bce_loss(pred_obj[obj_mask], torch.ones_like(pred_obj[obj_mask]))
+        loss_obj_fake = self.bce_loss(
+            pred_obj[noobj_mask],
+            torch.zeros_like(pred_obj[noobj_mask]),
+        )
+        loss_obj = loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()
+
+        loss_x = self.mse_loss(pred_x[obj_mask], tx[obj_mask]).sum()
+        loss_y = self.mse_loss(pred_y[obj_mask], ty[obj_mask]).sum()
+        loss_w = self.mse_loss(pred_w[obj_mask], tw[obj_mask]).sum()
+        loss_h = self.mse_loss(pred_h[obj_mask], th[obj_mask]).sum()
+        loss_box = self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)
+
+        total_loss = (loss_obj + loss_box) / batch_size
+        return {
+            "total_loss": total_loss,
+            "loss_obj": loss_obj / batch_size,
+            "loss_box": loss_box / batch_size,
+        }
+
+    def get_decode_config(self, device):
+        _ = device
+        return {}
+
+
+def build_loss(yolox_cfg=None):
+    yolox_cfg = yolox_cfg or {}
+    return MusicYOLOXLoss(
+        lambda_coord=yolox_cfg.get("lambda_coord", 5.0),
+        lambda_noobj=yolox_cfg.get("lambda_noobj", 0.5),
+    )
+
+
+def build_loss_from_config(model_cfg=None):
+    from training.model import normalize_architecture_name
+
+    model_cfg = model_cfg or {}
+    architecture = normalize_architecture_name(model_cfg.get("architecture", "yolox"))
+    if architecture == "yolo":
+        yolo_cfg = model_cfg.get("yolo", {})
+        num_anchors = model_cfg.get("num_anchors", yolo_cfg.get("num_anchors", 3))
+        return MusicYOLOLoss(
+            num_anchors=num_anchors,
+            anchors=yolo_cfg.get("anchors"),
+            lambda_coord=yolo_cfg.get("lambda_coord", 5.0),
+            lambda_noobj=yolo_cfg.get("lambda_noobj", 0.5),
+        )
+
+    yolox_cfg = model_cfg.get("yolox", {})
+    return MusicYOLOXLoss(
+        lambda_coord=yolox_cfg.get("lambda_coord", 5.0),
+        lambda_noobj=yolox_cfg.get("lambda_noobj", 0.5),
+    )

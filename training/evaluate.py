@@ -14,7 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from training.dataset import MusicNoteDataset
-from training.model import DualStreamMusicYOLO
+from training.model import build_model, normalize_architecture_name
+from training.loss import build_loss_from_config
 from training.utils import decode_predictions, boxes_to_midi_notes, get_train_val_test_split, load_yaml
 
 def notes_to_mir_arrays(notes):
@@ -24,7 +25,7 @@ def notes_to_mir_arrays(notes):
     p  = np.array([float(n['pitch_midi']) for n in notes], dtype=float)
     return iv, p
 
-def run_full_metrics(predictions, dataset, anchors, conf, nms):
+def run_full_metrics(predictions, dataset, conf, nms, anchors=None):
     """Calculates both Strict and Lenient (op) metrics across the entire test set."""
     results = []
     
@@ -33,7 +34,12 @@ def run_full_metrics(predictions, dataset, anchors, conf, nms):
 
     for i, pred in enumerate(predictions):
         item = dataset[i]
-        batch_boxes = decode_predictions(pred, anchors, conf_threshold=conf, nms_iou_threshold=nms)
+        batch_boxes = decode_predictions(
+            pred,
+            anchors=anchors,
+            conf_threshold=conf,
+            nms_iou_threshold=nms,
+        )
         
         est_notes = boxes_to_midi_notes(batch_boxes[0], item['total_time_sec'])
         ref_iv, ref_p = notes_to_mir_arrays(item['notes'])
@@ -81,7 +87,7 @@ def run_full_metrics(predictions, dataset, anchors, conf, nms):
     # Aggregate results into a single average dictionary
     return {k: np.mean([r[k] for r in results]) for k in results[0].keys()}
 
-def print_mir_table(metrics, model_name="CREPE-YOLO"):
+def print_mir_table(metrics, model_name="CREPE-YOLOX"):
     """Prints the evaluation results in the standardized MIR-eval table format."""
     hdr = f"  {'Model':<16} {'P':>6} {'R':>6} {'F1':>6} {'AOR':>6}   {'P(op)':>6} {'R(op)':>6} {'F1(op)':>7}"
     print("\n" + "=" * len(hdr))
@@ -96,10 +102,10 @@ def print_mir_table(metrics, model_name="CREPE-YOLO"):
     print("  Left: onset+offset+pitch  |  Tolerances: onset +/-50ms, offset +/-50ms or 20%, pitch +/-0.5 st\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="CREPE-YOLO Evaluation and Tuning")
+    parser = argparse.ArgumentParser(description="CREPE-YOLO/YOLOX Evaluation and Tuning")
     parser.add_argument('--tune', action='store_true', help="Run grid search for thresholds")
     parser.add_argument('--config', type=str, default='configs/base.yaml')
-    parser.add_argument('--ckpt', type=str, default='outputs/crepe_yolo_base_run/checkpoints/checkpoint_epoch_60.pt')
+    parser.add_argument('--ckpt', type=str, default='outputs/crepe_yolox_base_run/checkpoints/best_val_f1_op.pt')
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -111,12 +117,15 @@ def main():
     processed_dir = cfg["data"]["processed_dir"]
     
     # Setup Model and Data
-    model = DualStreamMusicYOLO(num_anchors=3).to(device)
+    model_cfg = cfg.get("model", {})
+    architecture = normalize_architecture_name(model_cfg.get("architecture", "yolox"))
+    model = build_model(model_cfg).to(device)
+    loss_fn = build_loss_from_config(model_cfg).to(device)
+    decode_cfg = loss_fn.get_decode_config(device)
     checkpoint = torch.load(args.ckpt, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    
-    anchors = torch.tensor([[0.0026, 0.0139],[0.0062, 0.0139],[0.0153, 0.0139]], device=device)
+
     all_stems = [d for d in os.listdir(processed_dir) if os.path.isdir(os.path.join(processed_dir, d))]
     data_cfg = cfg.get("data", {})
     _, _, test_stems = get_train_val_test_split(
@@ -154,7 +163,13 @@ def main():
         for c in conf_grid:
             for n in nms_grid:
                 # Use a fast metric for tuning
-                results = run_full_metrics(prediction_cache, dataset, anchors, c, n)
+                results = run_full_metrics(
+                    prediction_cache,
+                    dataset,
+                    conf=c,
+                    nms=n,
+                    **decode_cfg,
+                )
                 print(f"{c:<10.2f} | {n:<10.2f} | {results['F1_op']:<12.4f}")
                 if results['F1_op'] > max_f1:
                     max_f1, best_conf, best_nms = results['F1_op'], c, n
@@ -162,8 +177,14 @@ def main():
 
     # 3. Final Output (Full Table)
     print(f"\n--- Final Results (Conf={best_conf}, NMS={best_nms}) ---")
-    final_metrics = run_full_metrics(prediction_cache, dataset, anchors, best_conf, best_nms)
-    print_mir_table(final_metrics)
+    final_metrics = run_full_metrics(
+        prediction_cache,
+        dataset,
+        conf=best_conf,
+        nms=best_nms,
+        **decode_cfg,
+    )
+    print_mir_table(final_metrics, model_name=f"CREPE-{architecture.upper()}")
 
 if __name__ == "__main__":
     main()

@@ -12,7 +12,7 @@ if str(TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(TRAINING_DIR))
 
 class MusicNoteDataset(Dataset):
-    """PyTorch Dataset loading pre-computed CREPE features and YOLO targets."""
+    """PyTorch Dataset loading pre-computed CREPE features and YOLOX targets."""
     def __init__(self, processed_dir: str, stems: list[str]):
         """
         Args:
@@ -26,9 +26,9 @@ class MusicNoteDataset(Dataset):
     def __len__(self) -> int:
         return len(self.stems)
 
-    def _notes_to_yolo_targets(self, notes: list[dict], total_time_sec: float) -> torch.Tensor:
+    def _notes_to_yolox_targets(self, notes: list[dict], total_time_sec: float) -> torch.Tensor:
         """
-        Converts ground truth to normalized YOLO format: [class_id, x_c, y_c, w, h].
+        Converts ground truth to normalized YOLOX format: [class_id, x_c, y_c, w, h].
         """
         targets = []
         for n in notes:
@@ -81,7 +81,7 @@ class MusicNoteDataset(Dataset):
         T_padded = features['posteriorgram'].shape[-1]
         total_time_sec = T_padded * (self.step_size_ms / 1000.0)
         
-        targets = self._notes_to_yolo_targets(notes, total_time_sec)
+        targets = self._notes_to_yolox_targets(notes, total_time_sec)
         
         return {
             'stem': stem,

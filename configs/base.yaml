@@ -1,5 +1,5 @@
 seed: 42
-run_name: crepe_yolo_base_run
+run_name: crepe_yolox_base_run
 output_root: outputs
 
 # Data configuration
@@ -16,7 +16,20 @@ data:
 
 # Model configuration
 model:
+  # Switch between the anchor-based YOLO head and anchor-free YOLOX head.
+  # Options: yolo, yolox
+  architecture: yolox
   num_anchors: 3
+  yolo:
+    anchors:
+      - [0.0026, 0.0139]
+      - [0.0062, 0.0139]
+      - [0.0153, 0.0139]
+    lambda_coord: 5.0
+    lambda_noobj: 0.5
+  yolox:
+    lambda_coord: 5.0
+    lambda_noobj: 0.5
 
 # Optimizer configuration
 optim:
@@ -35,7 +48,7 @@ train:
 # MLflow configuration
 mlflow:
   tracking_uri: file:./mlruns
-  experiment_name: CREPE-YOLO-Transcription
+  experiment_name: CREPE-YOLOX-Transcription
 
 # Evaluation configuration (for evaluate.py)
 eval:

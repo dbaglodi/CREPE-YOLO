@@ -1,6 +1,6 @@
-# CREPE-YOLO Transcription Project
+# CREPE-YOLOX Transcription Project
 
-CREPE-YOLO trains a YOLO-style note detector on top of precomputed CREPE features for monophonic transcription experiments. This README focuses on the repo's current training workflow: preparing features, running a single training job, launching a hyperparameter sweep, selecting the best run, and understanding how YAML configs control behavior.
+CREPE-YOLOX trains a YOLOX-style note detector on top of precomputed CREPE features for monophonic transcription experiments. This README focuses on the repo's current training workflow: preparing features, running a single training job, launching a hyperparameter sweep, selecting the best run, and understanding how YAML configs control behavior.
 
 ## Setup
 
@@ -189,7 +189,7 @@ All training runs start from a YAML file such as configs/base.yaml, configs/test
 - `run_name`: name of the run directory under `output_root`.
 - `output_root`: parent directory for training artifacts.
 - `data`: dataset path, dataloader settings, split fractions, and train-size controls.
-- `model`: model architecture settings such as `num_anchors`.
+- `model`: detector architecture and loss weighting settings.
 - `optim`: optimizer settings such as learning rate and weight decay.
 - `train`: training-time settings such as device, epochs, gradient clipping, checkpoint cadence, and train-metric subsampling.
 - `mlflow`: tracking URI and experiment name.
@@ -201,7 +201,7 @@ All training runs start from a YAML file such as configs/base.yaml, configs/test
 
 ### `model.*`
 
-`model.num_anchors` controls the YOLO head anchor count used by the model and loss.
+`model.architecture` selects the detector head. Use `yolo` for the anchor-based head or `yolox` for the anchor-free head. `model.yolo.*` controls anchors and YOLO loss weights; `model.yolox.*` controls YOLOX loss weights.
 
 ### `optim.*`
 
@@ -244,7 +244,7 @@ The sweep scripts do not introduce a separate config system. They load a normal 
 For a typical run, expect to see:
 
 - `outputs/<run_name>/resolved_config.yaml`
-- `outputs/<run_name>/checkpoints/crepe_yolo_epoch_<N>.pt` for periodic saves
+- `outputs/<run_name>/checkpoints/crepe_yolox_epoch_<N>.pt` for periodic saves
 - `outputs/<run_name>/checkpoints/best_val_f1_op.pt`
 - `outputs/<run_name>/checkpoints/best_test_f1_op.pt`
 - MLflow metrics including best validation and test `F1(op)`
