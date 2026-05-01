@@ -3,6 +3,139 @@ import torch
 import torch.nn as nn
 
 
+class MusicYOLOLoss(nn.Module):
+    def __init__(
+        self,
+        num_anchors=3,
+        anchors=None,
+        lambda_coord=5.0,
+        lambda_noobj=0.5,
+    ):
+        super().__init__()
+        self.num_anchors = num_anchors
+        self.lambda_coord = lambda_coord
+        self.lambda_noobj = lambda_noobj
+        self.mse_loss = nn.MSELoss(reduction="none")
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction="none")
+
+        anchors = anchors or [
+            [0.0026, 0.0139],
+            [0.0062, 0.0139],
+            [0.0153, 0.0139],
+        ]
+        if len(anchors) != num_anchors:
+            raise ValueError(
+                f"Expected {num_anchors} anchors, received {len(anchors)}."
+            )
+        self.register_buffer("anchors", torch.tensor(anchors, dtype=torch.float32))
+
+    def build_targets(self, targets, batch_size, height, time_steps, device):
+        obj_mask = torch.zeros(
+            batch_size,
+            self.num_anchors,
+            height,
+            time_steps,
+            device=device,
+            dtype=torch.bool,
+        )
+        noobj_mask = torch.ones(
+            batch_size,
+            self.num_anchors,
+            height,
+            time_steps,
+            device=device,
+            dtype=torch.bool,
+        )
+        tx = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+        ty = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+        tw = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+        th = torch.zeros(batch_size, self.num_anchors, height, time_steps, device=device)
+
+        for batch_idx in range(batch_size):
+            batch_targets = targets[batch_idx]
+            valid_targets = batch_targets[batch_targets[:, 0] != -1]
+
+            for target in valid_targets:
+                _, gx, gy, gw, gh = target
+
+                grid_x = int(gx * time_steps)
+                grid_y = int(gy * height)
+                grid_x = max(0, min(grid_x, time_steps - 1))
+                grid_y = max(0, min(grid_y, height - 1))
+
+                anchor_diffs = torch.abs(self.anchors[:, 0] - gw)
+                best_anchor = torch.argmin(anchor_diffs)
+
+                obj_mask[batch_idx, best_anchor, grid_y, grid_x] = True
+                noobj_mask[batch_idx, best_anchor, grid_y, grid_x] = False
+                tx[batch_idx, best_anchor, grid_y, grid_x] = (gx * time_steps) - grid_x
+                ty[batch_idx, best_anchor, grid_y, grid_x] = (gy * height) - grid_y
+                tw[batch_idx, best_anchor, grid_y, grid_x] = torch.log(
+                    gw / self.anchors[best_anchor, 0] + 1e-16
+                )
+                th[batch_idx, best_anchor, grid_y, grid_x] = torch.log(
+                    gh / self.anchors[best_anchor, 1] + 1e-16
+                )
+
+        return obj_mask, noobj_mask, tx, ty, tw, th
+
+    def forward(self, predictions, targets):
+        batch_size, channels, height, time_steps = predictions.shape
+        expected_channels = self.num_anchors * 5
+        if channels != expected_channels:
+            raise ValueError(
+                f"YOLO predictions must have {expected_channels} channels, received {channels}"
+            )
+
+        device = predictions.device
+        predictions = predictions.view(
+            batch_size,
+            self.num_anchors,
+            5,
+            height,
+            time_steps,
+        )
+
+        pred_x = torch.sigmoid(predictions[:, :, 0, :, :])
+        pred_y = torch.sigmoid(predictions[:, :, 1, :, :])
+        pred_w = predictions[:, :, 2, :, :]
+        pred_h = predictions[:, :, 3, :, :]
+        pred_obj = predictions[:, :, 4, :, :]
+
+        obj_mask, noobj_mask, tx, ty, tw, th = self.build_targets(
+            targets,
+            batch_size,
+            height,
+            time_steps,
+            device,
+        )
+
+        loss_obj_real = self.bce_loss(pred_obj[obj_mask], torch.ones_like(pred_obj[obj_mask]))
+        loss_obj_fake = self.bce_loss(
+            pred_obj[noobj_mask],
+            torch.zeros_like(pred_obj[noobj_mask]),
+        )
+        loss_obj = loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()
+
+        loss_x = self.mse_loss(pred_x[obj_mask], tx[obj_mask]).sum()
+        loss_y = self.mse_loss(pred_y[obj_mask], ty[obj_mask]).sum()
+        loss_w = self.mse_loss(pred_w[obj_mask], tw[obj_mask]).sum()
+        loss_h = self.mse_loss(pred_h[obj_mask], th[obj_mask]).sum()
+        loss_box = self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)
+
+        total_loss = (loss_obj + loss_box) / batch_size
+        return {
+            "total_loss": total_loss,
+            "loss_obj": loss_obj / batch_size,
+            "loss_box": loss_box / batch_size,
+        }
+
+    def get_decode_config(self, device):
+        return {
+            "anchors": self.anchors.detach().to(device),
+        }
+
+
 class MusicYOLOXLoss(nn.Module):
     def __init__(self, lambda_coord=5.0, lambda_noobj=0.5):
         super().__init__()
@@ -100,6 +233,28 @@ class MusicYOLOXLoss(nn.Module):
 
 def build_loss(yolox_cfg=None):
     yolox_cfg = yolox_cfg or {}
+    return MusicYOLOXLoss(
+        lambda_coord=yolox_cfg.get("lambda_coord", 5.0),
+        lambda_noobj=yolox_cfg.get("lambda_noobj", 0.5),
+    )
+
+
+def build_loss_from_config(model_cfg=None):
+    from training.model import normalize_architecture_name
+
+    model_cfg = model_cfg or {}
+    architecture = normalize_architecture_name(model_cfg.get("architecture", "yolox"))
+    if architecture == "yolo":
+        yolo_cfg = model_cfg.get("yolo", {})
+        num_anchors = model_cfg.get("num_anchors", yolo_cfg.get("num_anchors", 3))
+        return MusicYOLOLoss(
+            num_anchors=num_anchors,
+            anchors=yolo_cfg.get("anchors"),
+            lambda_coord=yolo_cfg.get("lambda_coord", 5.0),
+            lambda_noobj=yolo_cfg.get("lambda_noobj", 0.5),
+        )
+
+    yolox_cfg = model_cfg.get("yolox", {})
     return MusicYOLOXLoss(
         lambda_coord=yolox_cfg.get("lambda_coord", 5.0),
         lambda_noobj=yolox_cfg.get("lambda_noobj", 0.5),

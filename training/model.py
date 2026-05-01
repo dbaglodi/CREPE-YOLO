@@ -132,6 +132,41 @@ class MusicYOLOXHead(nn.Module):
         return torch.cat([self.reg_pred(reg_features), self.obj_pred(obj_features)], dim=1)
 
 
+class MusicYOLOHead(nn.Module):
+    """Anchor-based YOLO head that predicts one box/objectness tuple per anchor."""
+
+    def __init__(self, in_channels=576, num_anchors=3):
+        super().__init__()
+        self.num_anchors = num_anchors
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.SiLU(),
+            nn.Conv2d(256, num_anchors * 5, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class DualStreamMusicYOLO(nn.Module):
+    """End-to-end network with the anchor-based YOLO head."""
+
+    def __init__(self, num_anchors=3):
+        super().__init__()
+        self.backbone = DualStreamBackbone()
+        self.head = MusicYOLOHead(in_channels=576, num_anchors=num_anchors)
+
+    def forward(self, posteriorgram, embedding, confidence, gradient):
+        fused_features = self.backbone(
+            posteriorgram,
+            embedding,
+            confidence,
+            gradient,
+        )
+        return self.head(fused_features)
+
+
 class DualStreamMusicYOLOX(nn.Module):
     """End-to-end network with the anchor-free YOLOX head."""
 
@@ -148,3 +183,27 @@ class DualStreamMusicYOLOX(nn.Module):
             gradient,
         )
         return self.head(fused_features)
+
+
+def normalize_architecture_name(name: str | None) -> str:
+    architecture = (name or "yolox").lower()
+    aliases = {
+        "crepe-yolo": "yolo",
+        "crepe_yolo": "yolo",
+        "crepe-yolox": "yolox",
+        "crepe_yolox": "yolox",
+    }
+    architecture = aliases.get(architecture, architecture)
+    if architecture not in {"yolo", "yolox"}:
+        raise ValueError(f"Unsupported model architecture '{name}'. Use 'yolo' or 'yolox'.")
+    return architecture
+
+
+def build_model(model_cfg: dict | None = None) -> nn.Module:
+    model_cfg = model_cfg or {}
+    architecture = normalize_architecture_name(model_cfg.get("architecture", "yolox"))
+    if architecture == "yolo":
+        yolo_cfg = model_cfg.get("yolo", {})
+        num_anchors = model_cfg.get("num_anchors", yolo_cfg.get("num_anchors", 3))
+        return DualStreamMusicYOLO(num_anchors=num_anchors)
+    return DualStreamMusicYOLOX()

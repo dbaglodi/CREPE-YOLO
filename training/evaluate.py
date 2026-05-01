@@ -14,7 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from training.dataset import MusicNoteDataset
-from training.model import DualStreamMusicYOLOX
+from training.model import build_model, normalize_architecture_name
+from training.loss import build_loss_from_config
 from training.utils import decode_predictions, boxes_to_midi_notes, get_train_val_test_split, load_yaml
 
 def notes_to_mir_arrays(notes):
@@ -24,7 +25,7 @@ def notes_to_mir_arrays(notes):
     p  = np.array([float(n['pitch_midi']) for n in notes], dtype=float)
     return iv, p
 
-def run_full_metrics(predictions, dataset, conf, nms):
+def run_full_metrics(predictions, dataset, conf, nms, anchors=None):
     """Calculates both Strict and Lenient (op) metrics across the entire test set."""
     results = []
     
@@ -35,6 +36,7 @@ def run_full_metrics(predictions, dataset, conf, nms):
         item = dataset[i]
         batch_boxes = decode_predictions(
             pred,
+            anchors=anchors,
             conf_threshold=conf,
             nms_iou_threshold=nms,
         )
@@ -81,7 +83,7 @@ def print_mir_table(metrics, model_name="CREPE-YOLOX"):
     print("  Left: onset+offset+pitch  |  Tolerances: onset +/-50ms, offset +/-50ms or 20%, pitch +/-0.5 st\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="CREPE-YOLOX Evaluation and Tuning")
+    parser = argparse.ArgumentParser(description="CREPE-YOLO/YOLOX Evaluation and Tuning")
     parser.add_argument('--tune', action='store_true', help="Run grid search for thresholds")
     parser.add_argument('--config', type=str, default='configs/base.yaml')
     parser.add_argument('--ckpt', type=str, default='outputs/crepe_yolox_base_run/checkpoints/best_val_f1_op.pt')
@@ -97,7 +99,10 @@ def main():
     
     # Setup Model and Data
     model_cfg = cfg.get("model", {})
-    model = DualStreamMusicYOLOX().to(device)
+    architecture = normalize_architecture_name(model_cfg.get("architecture", "yolox"))
+    model = build_model(model_cfg).to(device)
+    loss_fn = build_loss_from_config(model_cfg).to(device)
+    decode_cfg = loss_fn.get_decode_config(device)
     checkpoint = torch.load(args.ckpt, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -144,6 +149,7 @@ def main():
                     dataset,
                     conf=c,
                     nms=n,
+                    **decode_cfg,
                 )
                 print(f"{c:<10.2f} | {n:<10.2f} | {results['F1_op']:<12.4f}")
                 if results['F1_op'] > max_f1:
@@ -157,8 +163,9 @@ def main():
         dataset,
         conf=best_conf,
         nms=best_nms,
+        **decode_cfg,
     )
-    print_mir_table(final_metrics, model_name="CREPE-YOLOX")
+    print_mir_table(final_metrics, model_name=f"CREPE-{architecture.upper()}")
 
 if __name__ == "__main__":
     main()

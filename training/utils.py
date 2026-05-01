@@ -70,7 +70,7 @@ def get_train_val_test_split(
     final_train = final_train[:int(len(final_train) * train_set_usage)]
     return final_train, final_val, test_stems
 
-def music_yolox_collate_fn(batch):
+def music_detection_collate_fn(batch):
     """Pads variable-length features and targets for batching."""
     stems = [item['stem'] for item in batch]
     
@@ -92,7 +92,7 @@ def music_yolox_collate_fn(batch):
                 v = F.pad(v, (0, pad_len))
             features[k].append(v)
             
-        # Adjust YOLOX target coordinates based on the new padded length
+        # Adjust target coordinates based on the new padded length
         targets = item['targets'].clone()
         if pad_len > 0 and len(targets) > 0:
             # Scale x_center and width to maintain absolute time position
@@ -123,6 +123,10 @@ def music_yolox_collate_fn(batch):
         padded_targets = torch.zeros(0)
         
     return {'stems': stems, 'features': features, 'targets': padded_targets}
+
+
+music_yolo_collate_fn = music_detection_collate_fn
+music_yolox_collate_fn = music_detection_collate_fn
 
 def _run_nms(boxes, scores, nms_iou_threshold, device):
     keep_idx = torchvision.ops.nms(
@@ -186,12 +190,94 @@ def decode_yolox_predictions(predictions, conf_threshold=0.5, nms_iou_threshold=
     return batch_boxes
 
 
-def decode_predictions(
+def decode_yolo_predictions(
     predictions,
+    anchors,
     conf_threshold=0.5,
     nms_iou_threshold=0.4,
 ):
-    """Decodes YOLOX predictions and applies NMS."""
+    """Decodes anchor-based YOLO predictions and applies NMS."""
+    if isinstance(anchors, list):
+        anchors = torch.tensor(
+            anchors,
+            device=predictions.device,
+            dtype=predictions.dtype,
+        )
+
+    bsz, channels, height, time_steps = predictions.shape
+    num_anchors = len(anchors)
+    expected_channels = num_anchors * 5
+    if channels != expected_channels:
+        raise ValueError(
+            f"YOLO predictions must have {expected_channels} channels, received {channels}"
+        )
+
+    device = predictions.device
+    preds = predictions.view(bsz, num_anchors, 5, height, time_steps)
+
+    pred_x = torch.sigmoid(preds[:, :, 0, :, :])
+    pred_y = torch.sigmoid(preds[:, :, 1, :, :])
+    pred_w = preds[:, :, 2, :, :]
+    pred_h = preds[:, :, 3, :, :]
+    pred_conf = torch.sigmoid(preds[:, :, 4, :, :])
+
+    batch_boxes = []
+
+    for batch_idx in range(bsz):
+        mask = pred_conf[batch_idx] > conf_threshold
+        if not mask.any():
+            batch_boxes.append(torch.zeros((0, 6), device=device))
+            continue
+
+        anchor_idx, grid_y, grid_x = torch.where(mask)
+        x_offset = pred_x[batch_idx, anchor_idx, grid_y, grid_x]
+        y_offset = pred_y[batch_idx, anchor_idx, grid_y, grid_x]
+        w_log = pred_w[batch_idx, anchor_idx, grid_y, grid_x]
+        h_log = pred_h[batch_idx, anchor_idx, grid_y, grid_x]
+        scores = pred_conf[batch_idx, anchor_idx, grid_y, grid_x]
+
+        cx = (grid_x + x_offset) / time_steps
+        cy = (grid_y + y_offset) / height
+        widths = torch.exp(w_log) * anchors[anchor_idx, 0].to(device)
+        heights = torch.exp(h_log) * anchors[anchor_idx, 1].to(device)
+
+        x1 = cx - widths / 2
+        y1 = cy - heights / 2
+        x2 = cx + widths / 2
+        y2 = cy + heights / 2
+        boxes = torch.stack([x1, y1, x2, y2], dim=1)
+
+        keep_idx = _run_nms(boxes, scores, nms_iou_threshold, device)
+        surviving_boxes = torch.stack(
+            [
+                cx[keep_idx],
+                cy[keep_idx],
+                widths[keep_idx],
+                heights[keep_idx],
+                scores[keep_idx],
+                torch.zeros_like(scores[keep_idx]),
+            ],
+            dim=1,
+        )
+        batch_boxes.append(surviving_boxes)
+
+    return batch_boxes
+
+
+def decode_predictions(
+    predictions,
+    anchors=None,
+    conf_threshold=0.5,
+    nms_iou_threshold=0.4,
+):
+    """Decodes YOLO or YOLOX predictions and applies NMS."""
+    if anchors is not None:
+        return decode_yolo_predictions(
+            predictions,
+            anchors,
+            conf_threshold=conf_threshold,
+            nms_iou_threshold=nms_iou_threshold,
+        )
     return decode_yolox_predictions(
         predictions,
         conf_threshold=conf_threshold,
