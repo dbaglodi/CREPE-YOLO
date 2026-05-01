@@ -30,6 +30,9 @@ model:
   yolox:
     lambda_coord: 5.0
     lambda_noobj: 0.5
+  model:
+    num_anchors: 3
+    use_raw_shape: true
 
 # Optimizer configuration
 optim:

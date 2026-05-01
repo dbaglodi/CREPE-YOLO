@@ -201,7 +201,7 @@ All training runs start from a YAML file such as configs/base.yaml, configs/test
 
 ### `model.*`
 
-`model.architecture` selects the detector head. Use `yolo` for the anchor-based head or `yolox` for the anchor-free head. `model.yolo.*` controls anchors and YOLO loss weights; `model.yolox.*` controls YOLOX loss weights.
+`model.architecture` selects the detector head. Use `yolo` for the anchor-based head or `yolox` for the anchor-free head. `model.yolo.*` controls anchors and YOLO loss weights; `model.yolox.*` controls YOLOX loss weights. `model.use_raw_shape` (boolean) toggles the raw audio shape skip connection for ablation studies. Set to `true` to include the RMS energy feature in the final fusion layer (577 channels) or `false` to run the baseline architecture (576 channels).
 
 ### `optim.*`
 

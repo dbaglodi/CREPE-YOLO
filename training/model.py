@@ -81,12 +81,13 @@ class SemanticBranch(nn.Module):
 class DualStreamBackbone(nn.Module):
     """Shared feature extractor used by the anchor-free YOLOX head."""
 
-    def __init__(self):
+    def __init__(self, use_raw_shape=True):
         super().__init__()
+        self.use_raw_shape = use_raw_shape
         self.visual_branch = VisualBranch()
-        self.semantic_branch = SemanticBranch()
+        self.semantic_branch = SemanticBranch(in_dim=2050)
 
-    def forward(self, posteriorgram, embedding, confidence, gradient):
+    def forward(self, posteriorgram, embedding, confidence, gradient, raw_shape=None):
         bsz, _, height, time_steps = posteriorgram.shape
         device = posteriorgram.device
 
@@ -99,7 +100,13 @@ class DualStreamBackbone(nn.Module):
         feat_b = self.semantic_branch(semantic_input)
         feat_b_tiled = feat_b.repeat(1, 1, feat_a.shape[2], 1)
 
-        return torch.cat([feat_a, feat_b_tiled], dim=1)
+        if self.use_raw_shape and raw_shape is not None:
+            target_t = feat_a.shape[-1]
+            raw_shape_downsampled = torch.nn.functional.adaptive_avg_pool1d(raw_shape, output_size=target_t)
+            raw_shape_tiled = raw_shape_downsampled.unsqueeze(2).repeat(1, 1, feat_a.shape[2], 1)
+            return torch.cat([feat_a, feat_b_tiled, raw_shape_tiled], dim=1) # 577 channels
+        else:
+            return torch.cat([feat_a, feat_b_tiled], dim=1) # 576 channels
 
 
 class MusicYOLOXHead(nn.Module):
@@ -152,17 +159,19 @@ class MusicYOLOHead(nn.Module):
 class DualStreamMusicYOLO(nn.Module):
     """End-to-end network with the anchor-based YOLO head."""
 
-    def __init__(self, num_anchors=3):
+    def __init__(self, num_anchors=3, use_raw_shape=True):
         super().__init__()
-        self.backbone = DualStreamBackbone(in_dim=2050)
-        self.head = MusicYOLOHead(in_channels=577, num_anchors=num_anchors)
+        self.backbone = DualStreamBackbone(use_raw_shape=use_raw_shape)
+        head_in_channels = 577 if use_raw_shape else 576
+        self.head = MusicYOLOHead(in_channels=head_in_channels, num_anchors=num_anchors)
 
-    def forward(self, posteriorgram, embedding, confidence, gradient):
+    def forward(self, posteriorgram, embedding, confidence, gradient, raw_shape=None):
         fused_features = self.backbone(
             posteriorgram,
             embedding,
             confidence,
             gradient,
+            raw_shape
         )
         return self.head(fused_features)
 
@@ -170,17 +179,19 @@ class DualStreamMusicYOLO(nn.Module):
 class DualStreamMusicYOLOX(nn.Module):
     """End-to-end network with the anchor-free YOLOX head."""
 
-    def __init__(self):
+    def __init__(self, use_raw_shape=True):
         super().__init__()
-        self.backbone = DualStreamBackbone()
-        self.head = MusicYOLOXHead(in_channels=576)
+        self.backbone = DualStreamBackbone(use_raw_shape=use_raw_shape)
+        head_in_channels = 577 if use_raw_shape else 576
+        self.head = MusicYOLOXHead(in_channels=head_in_channels)
 
-    def forward(self, posteriorgram, embedding, confidence, gradient):
+    def forward(self, posteriorgram, embedding, confidence, gradient, raw_shape=None):
         fused_features = self.backbone(
             posteriorgram,
             embedding,
             confidence,
             gradient,
+            raw_shape
         )
         return self.head(fused_features)
 
@@ -202,8 +213,9 @@ def normalize_architecture_name(name: str | None) -> str:
 def build_model(model_cfg: dict | None = None) -> nn.Module:
     model_cfg = model_cfg or {}
     architecture = normalize_architecture_name(model_cfg.get("architecture", "yolox"))
+    use_raw_shape = model_cfg.get("use_raw_shape", True)
     if architecture == "yolo":
         yolo_cfg = model_cfg.get("yolo", {})
         num_anchors = model_cfg.get("num_anchors", yolo_cfg.get("num_anchors", 3))
-        return DualStreamMusicYOLO(num_anchors=num_anchors)
-    return DualStreamMusicYOLOX()
+        return DualStreamMusicYOLO(num_anchors=num_anchors, use_raw_shape=use_raw_shape)
+    return DualStreamMusicYOLOX(use_raw_shape=use_raw_shape)

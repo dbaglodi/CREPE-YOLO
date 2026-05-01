@@ -52,6 +52,7 @@ def generate_paper_teaser(stem_name, checkpoint_path, processed_dir='data/proces
     embedding = features['embedding'].to(device)
     confidence = features['confidence'].to(device)
     gradient = features['gradient'].to(device)
+    raw_shape = features['raw_shape'].to(device)
     
     with open(notes_path, 'r') as f:
         ground_truth = json.load(f)
@@ -63,7 +64,7 @@ def generate_paper_teaser(stem_name, checkpoint_path, processed_dir='data/proces
     model.eval()
     
     with torch.no_grad():
-        predictions = model(posteriorgram, embedding, confidence, gradient)
+        predictions = model(posteriorgram, embedding, confidence, gradient, raw_shape)
         
     # --- 3. Extract the Objectness Map and Bounding Boxes Safely ---
     # Objectness activation map
