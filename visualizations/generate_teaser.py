@@ -11,7 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
-from training.model import DualStreamMusicYOLO
+from training.model import DualStreamMusicYOLOX
 from training.utils import decode_predictions, load_yaml, get_train_test_split
 
 import os
@@ -27,7 +27,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
-from training.model import DualStreamMusicYOLO
+from training.model import DualStreamMusicYOLOX
 from training.utils import decode_predictions, load_yaml, get_train_test_split
 
 def generate_paper_teaser(stem_name, checkpoint_path, processed_dir='data/processed/itm_flute'):
@@ -57,7 +57,7 @@ def generate_paper_teaser(stem_name, checkpoint_path, processed_dir='data/proces
         ground_truth = json.load(f)
 
     # --- 2. Load Model & Forward Pass ---
-    model = DualStreamMusicYOLO(num_anchors=3).to(device)
+    model = DualStreamMusicYOLOX().to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -66,16 +66,11 @@ def generate_paper_teaser(stem_name, checkpoint_path, processed_dir='data/proces
         predictions = model(posteriorgram, embedding, confidence, gradient)
         
     # --- 3. Extract the Objectness Map and Bounding Boxes Safely ---
-    B, C, grid_y, grid_t = predictions.shape
-    predictions_reshaped = predictions.view(B, 3, 5, grid_y, grid_t)
-    
     # Objectness activation map
-    obj_map = torch.sigmoid(predictions_reshaped[0, :, 4, :, :])
-    obj_heatmap = torch.max(obj_map, dim=0)[0].cpu().numpy()
+    obj_heatmap = torch.sigmoid(predictions[0, 4, :, :]).cpu().numpy()
 
     # Create boxes using utils.decode_predictions
-    anchors = torch.tensor([[0.0026, 0.0139],[0.0062, 0.0139],[0.0153, 0.0139]], device=device)
-    decoded_boxes_batch = decode_predictions(predictions, anchors, conf_threshold=0.4, nms_iou_threshold=0.4)
+    decoded_boxes_batch = decode_predictions(predictions, conf_threshold=0.4, nms_iou_threshold=0.4)
     predictions_decoded = decoded_boxes_batch[0]
 
     # --- 4. Plotting Setup (2x2 Grid - Slim Profile) ---
@@ -109,7 +104,7 @@ def generate_paper_teaser(stem_name, checkpoint_path, processed_dir='data/proces
         axes[0,1].add_patch(rect)
 
     # [1,0] Bottom Left: Model Objectness
-    axes[1,0].set_title("Dual-Stream YOLO Internal Objectness Activation", fontsize=11, fontweight='bold')
+    axes[1,0].set_title("Dual-Stream YOLOX Internal Objectness Activation", fontsize=11, fontweight='bold')
     im3 = axes[1,0].imshow(obj_heatmap, aspect='auto', origin='lower', cmap='viridis', extent=time_extent + [0, 11])
     axes[1,0].set_ylabel("Grid Y") 
     axes[1,0].set_xlabel("Time (Seconds)", fontsize=10)
@@ -156,7 +151,7 @@ def get_sample_test_stem(processed_dir='data/processed/itm_flute', seed=42):
     return random.choice(test_stems)
 
 if __name__ == "__main__":
-    ckpt_file = "/Users/skessler/Library/CloudStorage/OneDrive-GeorgiaInstituteofTechnology/Semesters/Spring 2026/sandbox/mlruns/215425903410791788/b755f00b9ee142439d0555ae963ddc19/artifacts/crepe_yolo_epoch_20.pt" 
+    ckpt_file = "outputs/crepe_yolox_base_run/checkpoints/best_val_f1_op.pt"
     data_dir = "data/processed/itm_flute"
     
     # Automatically select a confirmed test set stem for evaluation
