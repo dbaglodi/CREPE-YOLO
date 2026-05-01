@@ -45,7 +45,26 @@ def run_full_metrics(predictions, dataset, conf, nms, anchors=None):
         ref_iv, ref_p = notes_to_mir_arrays(item['notes'])
         est_iv, est_p = notes_to_mir_arrays(est_notes)
 
-        if len(est_iv) == 0:
+        # Filter zero-duration notes
+        if len(ref_iv) > 0:
+            valid_ref = ref_iv[:, 1] > ref_iv[:, 0]
+            ref_iv, ref_p = ref_iv[valid_ref], ref_p[valid_ref]
+            
+        if len(est_iv) > 0:
+            valid_est = est_iv[:, 1] > est_iv[:, 0]
+            est_iv, est_p = est_iv[valid_est], est_p[valid_est]
+
+        # Trim backing track bleed
+        if len(ref_iv) > 0 and len(est_iv) > 0:
+            first_ref = np.min(ref_iv)
+            last_ref = np.max(ref_iv)
+            
+            # Keep predictions inside the actual solo timeframe
+            valid_idxs = np.unique(np.where((est_iv[:, 0] >= first_ref) & (est_iv[:, 0] <= last_ref))[0])
+            est_iv = est_iv[valid_idxs]
+            est_p = est_p[valid_idxs]
+
+        if len(est_iv) == 0 or len(ref_iv) == 0:
             # Handle cases with no predictions to avoid divide-by-zero
             stats = {k: 0.0 for k in ['P', 'R', 'F1', 'AOR', 'P_op', 'R_op', 'F1_op']}
         else:

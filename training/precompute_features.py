@@ -17,7 +17,7 @@ def run_pytorch_conversion():
     import numpy as np
     from tqdm import tqdm
     
-    processed_dir = Path('./data/processed/itm_flute')
+    processed_dir = Path('./data/processed/combined_data')
     stems = [d.name for d in processed_dir.iterdir() if d.is_dir()]
     downsample_factor = 32
     
@@ -31,8 +31,19 @@ def run_pytorch_conversion():
         if not npz_path.exists() or pt_path.exists():
             continue
             
-        data = np.load(npz_path)
-        features_np = {k: data[k] for k in data.files}
+        if not npz_path.exists() or pt_path.exists():
+            continue
+            
+        try:
+            data = np.load(npz_path)
+            # Force NumPy to actually read the zip contents right now
+            features_np = {k: data[k] for k in data.files}
+        except Exception as e:
+            print(f"\n[WARNING] Corrupted NPZ file found for {stem}: {e}")
+            print(f"Deleting {npz_path.name} so it can be cleanly regenerated.")
+            npz_path.unlink(missing_ok=True)
+            continue # Skip to the next stem
+        
         features_t = {k: torch.tensor(v, dtype=torch.float32) for k, v in features_np.items()}
         
         if features_t['gradient'].max() > 0:
@@ -133,7 +144,7 @@ class CREPEFeatureExtractor:
 
 def main():
     print(">>> [PHASE 1] Entering Main Loop...")
-    processed_dir = Path('./data/processed/itm_flute')
+    processed_dir = Path('./data/processed/combined_data')
     raw_audio_dir = Path('GT-ITM-Flute-99/audio')
     
     if not processed_dir.exists():
@@ -144,26 +155,22 @@ def main():
     
     extractor = CREPEFeatureExtractor(model_capacity='full', step_size=10)
     
+    # Inside Phase 1 of precompute_features.py:
     for stem in tqdm(stems, desc="Extracting Audio Features"):
         stem_dir = processed_dir / stem
         npz_path = stem_dir / 'features.npz'
         pt_path = stem_dir / 'features.pt'
-        
         audio_path_processed = stem_dir / 'audio_16k.wav'
-        audio_path_raw = raw_audio_dir / f"{stem}.wav"
         
         if pt_path.exists() or npz_path.exists():
             continue
             
-        if audio_path_processed.exists():
-            target_audio = audio_path_processed
-        elif audio_path_raw.exists():
-            target_audio = audio_path_raw
-        else:
+        if not audio_path_processed.exists():
+            print(f"  [WARN] Missing audio_16k.wav for {stem}")
             continue
             
         try:
-            features_np = extractor.extract_features_numpy(str(target_audio))
+            features_np = extractor.extract_features_numpy(str(audio_path_processed))
             np.savez(npz_path, **features_np)
         except Exception as e:
             print(f"\n[ERROR] Failed on {stem}: {e}")

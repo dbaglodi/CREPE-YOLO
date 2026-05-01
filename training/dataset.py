@@ -34,6 +34,11 @@ class MusicNoteDataset(Dataset):
         for n in notes:
             onset = n['onset']
             offset = n['offset']
+
+            # Skip zero-duration ghost notes
+            if offset <= onset:
+                continue
+
             pitch_midi = n['pitch_midi']
             
             # 1. Clamp pitch to CREPE's representable range (MIDI 24 to 95)
