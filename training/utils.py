@@ -121,8 +121,11 @@ def music_detection_collate_fn(batch):
     """Pads variable-length features and targets for batching."""
     stems = [item['stem'] for item in batch]
     
-    # 1. Find the maximum Time dimension (T) in this specific batch
-    max_T = max(item['features']['posteriorgram'].shape[-1] for item in batch)
+    # 1. Find the maximum length for EACH feature key independently
+    max_lengths = {k: max(item['features'][k].shape[-1] for item in batch) for k in batch[0]['features'].keys()}
+    
+    # We still need the posteriorgram's max_T to correctly scale the targets
+    max_T = max_lengths['posteriorgram']
     
     features = {k: [] for k in batch[0]['features'].keys()}
     targets_list = []
@@ -130,18 +133,19 @@ def music_detection_collate_fn(batch):
     # 2. Pad features and rescale targets for each item
     for item in batch:
         T_current = item['features']['posteriorgram'].shape[-1]
-        pad_len = max_T - T_current
+        target_pad_len = max_T - T_current
         
-        # Pad features with zeros on the right
+        # Pad features with zeros on the right based on THEIR specific max length
         for k in features.keys():
             v = item['features'][k]
-            if pad_len > 0:
-                v = F.pad(v, (0, pad_len))
+            feat_pad_len = max_lengths[k] - v.shape[-1]
+            if feat_pad_len > 0:
+                v = F.pad(v, (0, feat_pad_len))
             features[k].append(v)
             
         # Adjust target coordinates based on the new padded length
         targets = item['targets'].clone()
-        if pad_len > 0 and len(targets) > 0:
+        if target_pad_len > 0 and len(targets) > 0:
             # Scale x_center and width to maintain absolute time position
             targets[:, 1] *= (T_current / max_T) 
             targets[:, 3] *= (T_current / max_T) 
@@ -149,7 +153,7 @@ def music_detection_collate_fn(batch):
         
     # 3. Concatenate the padded features into a single batch tensor
     for k in features.keys():
-        features[k] = torch.cat(features[k], dim=0)
+        features[k] = torch.stack(features[k], dim=0) if k == 'raw_shape' else torch.cat(features[k], dim=0)
         # Ensure posteriorgram has the Channel dimension (B, 1, H, T)
         if k == 'posteriorgram' and features[k].dim() == 3:
             features[k] = features[k].unsqueeze(1)
@@ -170,7 +174,6 @@ def music_detection_collate_fn(batch):
         padded_targets = torch.zeros(0)
         
     return {'stems': stems, 'features': features, 'targets': padded_targets}
-
 
 music_yolo_collate_fn = music_detection_collate_fn
 music_yolox_collate_fn = music_detection_collate_fn
