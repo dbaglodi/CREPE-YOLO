@@ -206,11 +206,18 @@ class MusicYOLOXLoss(nn.Module):
             device,
         )
 
-        loss_obj_real = self.bce_loss(pred_obj[obj_mask], torch.ones_like(pred_obj[obj_mask]))
-        loss_obj_fake = self.bce_loss(
-            pred_obj[noobj_mask],
-            torch.zeros_like(pred_obj[noobj_mask]),
-        )
+        # Convert logits to probabilities
+        p = torch.sigmoid(pred_obj)
+        gamma = 2.0
+        
+        # Focal Loss for Real Objects (targets = 1)
+        # ce_loss = -log(p), modulating factor = (1 - p)^gamma
+        loss_obj_real = -torch.log(p[obj_mask] + 1e-8) * ((1.0 - p[obj_mask]) ** gamma)
+        
+        # Focal Loss for Fake Objects (targets = 0)
+        # ce_loss = -log(1 - p), modulating factor = p^gamma
+        loss_obj_fake = -torch.log(1.0 - p[noobj_mask] + 1e-8) * (p[noobj_mask] ** gamma)
+        
         loss_obj = loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()
 
         loss_x = self.mse_loss(pred_x[obj_mask], tx[obj_mask]).sum()

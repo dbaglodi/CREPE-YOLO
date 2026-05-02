@@ -364,7 +364,7 @@ def train(cfg: dict | None = None, resume: bool = False):
                         features['embedding'], 
                         features['confidence'], 
                         features['gradient'],
-                    features['raw_shape']
+                        features['raw_shape']
                     )
 
                     loss_dict = loss_fn(predictions, targets)

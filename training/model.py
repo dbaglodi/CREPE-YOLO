@@ -108,6 +108,38 @@ class DualStreamBackbone(nn.Module):
         else:
             return torch.cat([feat_a, feat_b_tiled], dim=1) # 576 channels
 
+class TemporalContextModule(nn.Module):
+    """
+    Dilated Temporal Convolution Network (TCN) Block.
+    Expands the receptive field along the time axis without destroying pitch resolution.
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Dilation 1 (looks 1 step back/forward)
+        self.d1 = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=(1, 3), padding=(0, 1), bias=False),
+            nn.BatchNorm2d(channels),
+            nn.SiLU()
+        )
+        # Dilation 2 (looks 2 steps back/forward)
+        self.d2 = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=(1, 3), padding=(0, 2), dilation=(1, 2), bias=False),
+            nn.BatchNorm2d(channels),
+            nn.SiLU()
+        )
+        # Dilation 4 (looks 4 steps back/forward)
+        self.d4 = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=(1, 3), padding=(0, 4), dilation=(1, 4), bias=False),
+            nn.BatchNorm2d(channels),
+            nn.SiLU()
+        )
+
+    def forward(self, x):
+        identity = x
+        x = self.d1(x)
+        x = self.d2(x)
+        x = self.d4(x)
+        return x + identity # Residual connection ensures stable gradient flow
 
 class MusicYOLOXHead(nn.Module):
     """Anchor-free decoupled head that predicts one box and objectness score per cell."""
@@ -119,6 +151,7 @@ class MusicYOLOXHead(nn.Module):
             nn.BatchNorm2d(hidden_channels),
             nn.SiLU(),
         )
+        self.temporal_context = TemporalContextModule(hidden_channels)
         self.reg_branch = nn.Sequential(
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(hidden_channels),
@@ -134,6 +167,7 @@ class MusicYOLOXHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
+        x = self.temporal_context(x)
         reg_features = self.reg_branch(x)
         obj_features = self.obj_branch(x)
         return torch.cat([self.reg_pred(reg_features), self.obj_pred(obj_features)], dim=1)
