@@ -5,13 +5,13 @@ output_root: outputs
 # Data configuration
 data:
   # Path to pre-computed features (from precompute_features.py)
-  processed_dir: data/processed/combined_data
-  batch_size: 4
+  processed_dir: /home/spencerpkessler/scratch/data/processed/combined_data
+  batch_size: 16
   num_workers: 0
   train_size: 0.64
   val_size: 0.16
   test_size: 0.20
-  combine_val_to_train: false
+  combine_val_to_train: true
   train_set_usage: 1.0
 
 # Model configuration
@@ -42,11 +42,11 @@ optim:
 
 # Training configuration
 train:
-  epochs: 300
+  epochs: 100
   device: cuda
-  grad_clip: 5.0
+  grad_clip: 3.0
   save_every: 10
-  train_metrics_max_samples: 32
+  train_metrics_max_samples: 100
 
 # MLflow configuration
 mlflow:
