@@ -220,7 +220,9 @@ def train(cfg: dict | None = None, resume: bool = False):
         batch_size=physical_batch_size, 
         shuffle=True, 
         collate_fn=music_detection_collate_fn,
-        num_workers=num_workers
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
     )
     val_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=val_stems)
     val_dataloader = DataLoader(
@@ -229,6 +231,8 @@ def train(cfg: dict | None = None, resume: bool = False):
         shuffle=False,
         collate_fn=music_detection_collate_fn,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
     )
     test_dataset = MusicNoteDataset(processed_dir=processed_dir, stems=test_stems)
     test_dataloader = DataLoader(
@@ -237,6 +241,8 @@ def train(cfg: dict | None = None, resume: bool = False):
         shuffle=False,
         collate_fn=music_detection_collate_fn,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
     )
     # Pass the training stems through the new stratifier
     train_metric_stems = get_stratified_eval_stems(train_stems, train_metrics_max_samples)
@@ -248,6 +254,8 @@ def train(cfg: dict | None = None, resume: bool = False):
         shuffle=False,
         collate_fn=music_detection_collate_fn,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
     )
 
     # --- 4. Model & Optimizer Initialization ---
@@ -386,9 +394,14 @@ def train(cfg: dict | None = None, resume: bool = False):
                 if (idx + 1) % accumulation_steps == 0 or (idx + 1) == len(dataloader):
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    # Record the scale before updating
+                    scale_before = scaler.get_scale()
                     scaler.step(optimizer)
                     scaler.update()
-                    scheduler.step()
+                    
+                    # Only step the scheduler if the optimizer actually stepped
+                    if scale_before <= scaler.get_scale():
+                        scheduler.step()
                     # Clear gradients for the next effective batch
                     optimizer.zero_grad()
 

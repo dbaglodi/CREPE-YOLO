@@ -193,8 +193,12 @@ def decode_yolox_predictions(predictions, conf_threshold=0.5, nms_iou_threshold=
     device = predictions.device
     pred_x = torch.sigmoid(predictions[:, 0, :, :])
     pred_y = torch.sigmoid(predictions[:, 1, :, :])
-    pred_w = torch.sigmoid(predictions[:, 2, :, :]).clamp(min=1e-6)
-    pred_h = torch.sigmoid(predictions[:, 3, :, :]).clamp(min=1e-6)
+    # pred_w = torch.sigmoid(predictions[:, 2, :, :]).clamp(min=1e-6)
+    # pred_h = torch.sigmoid(predictions[:, 3, :, :]).clamp(min=1e-6)
+    # 1. exp() converts log values back to absolute grid cells
+    # 2. Divide by time_steps/height to convert back to global [0, 1] for NMS
+    pred_w = (torch.exp(predictions[:, 2, :, :]) / time_steps).clamp(min=1e-6, max=1.0)
+    pred_h = (torch.exp(predictions[:, 3, :, :]) / height).clamp(min=1e-6, max=1.0)
     pred_conf = torch.sigmoid(predictions[:, 4, :, :])
 
     batch_boxes = []

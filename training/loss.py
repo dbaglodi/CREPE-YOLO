@@ -115,13 +115,16 @@ class MusicYOLOLoss(nn.Module):
             pred_obj[noobj_mask],
             torch.zeros_like(pred_obj[noobj_mask]),
         )
-        loss_obj = loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()
+
+        num_pos = obj_mask.sum().clamp(min=1.0)
+
+        loss_obj = (loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()) / num_pos
 
         loss_x = self.mse_loss(pred_x[obj_mask], tx[obj_mask]).sum()
         loss_y = self.mse_loss(pred_y[obj_mask], ty[obj_mask]).sum()
         loss_w = self.mse_loss(pred_w[obj_mask], tw[obj_mask]).sum()
         loss_h = self.mse_loss(pred_h[obj_mask], th[obj_mask]).sum()
-        loss_box = self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)
+        loss_box = (self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)) / num_pos
 
         total_loss = (loss_obj + loss_box) / batch_size
         return {
@@ -179,8 +182,11 @@ class MusicYOLOXLoss(nn.Module):
                 noobj_mask[batch_idx, grid_y, grid_x] = False
                 tx[batch_idx, grid_y, grid_x] = (gx * time_steps) - grid_x
                 ty[batch_idx, grid_y, grid_x] = (gy * height) - grid_y
-                tw[batch_idx, grid_y, grid_x] = gw
-                th[batch_idx, grid_y, grid_x] = gh
+                # tw[batch_idx, grid_y, grid_x] = gw
+                # th[batch_idx, grid_y, grid_x] = gh
+                # Convert global proportion to absolute grid cells, then take the log
+                tw[batch_idx, grid_y, grid_x] = torch.log((gw * time_steps) + 1e-8)
+                th[batch_idx, grid_y, grid_x] = torch.log((gh * height) + 1e-8)
 
         return obj_mask, noobj_mask, tx, ty, tw, th
 
@@ -194,8 +200,8 @@ class MusicYOLOXLoss(nn.Module):
         device = predictions.device
         pred_x = torch.sigmoid(predictions[:, 0, :, :])
         pred_y = torch.sigmoid(predictions[:, 1, :, :])
-        pred_w = torch.sigmoid(predictions[:, 2, :, :])
-        pred_h = torch.sigmoid(predictions[:, 3, :, :])
+        pred_w = predictions[:, 2, :, :]
+        pred_h = predictions[:, 3, :, :]
         pred_obj = predictions[:, 4, :, :]
 
         obj_mask, noobj_mask, tx, ty, tw, th = self.build_targets(
@@ -210,21 +216,23 @@ class MusicYOLOXLoss(nn.Module):
         p = torch.sigmoid(pred_obj)
         gamma = 2.0
         
-        # Focal Loss for Real Objects (targets = 1)
-        # ce_loss = -log(p), modulating factor = (1 - p)^gamma
-        loss_obj_real = -torch.log(p[obj_mask] + 1e-8) * ((1.0 - p[obj_mask]) ** gamma)
+        # 1. Calculate numerically stable BCE (Handles FP16 limits natively)
+        bce_real = self.bce_loss(pred_obj[obj_mask], torch.ones_like(pred_obj[obj_mask]))
+        bce_fake = self.bce_loss(pred_obj[noobj_mask], torch.zeros_like(pred_obj[noobj_mask]))
         
-        # Focal Loss for Fake Objects (targets = 0)
-        # ce_loss = -log(1 - p), modulating factor = p^gamma
-        loss_obj_fake = -torch.log(1.0 - p[noobj_mask] + 1e-8) * (p[noobj_mask] ** gamma)
-        
-        loss_obj = loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()
+        # 2. Apply the Focal Loss multiplier to the stable BCE
+        loss_obj_real = bce_real * ((1.0 - p[obj_mask]) ** gamma)
+        loss_obj_fake = bce_fake * (p[noobj_mask] ** gamma)
+       
+        num_pos = obj_mask.sum().clamp(min=1.0)
+
+        loss_obj = (loss_obj_real.sum() + self.lambda_noobj * loss_obj_fake.sum()) / num_pos
 
         loss_x = self.mse_loss(pred_x[obj_mask], tx[obj_mask]).sum()
         loss_y = self.mse_loss(pred_y[obj_mask], ty[obj_mask]).sum()
         loss_w = self.mse_loss(pred_w[obj_mask], tw[obj_mask]).sum()
         loss_h = self.mse_loss(pred_h[obj_mask], th[obj_mask]).sum()
-        loss_box = self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)
+        loss_box = (self.lambda_coord * (loss_x + loss_y + loss_w + loss_h)) / num_pos
 
         total_loss = (loss_obj + loss_box) / batch_size
         return {

@@ -1,5 +1,5 @@
 seed: 42
-run_name: crepe_yolox_base_run
+run_name: crepe_yolox_base_run_norm
 output_root: outputs
 
 # Data configuration
@@ -7,7 +7,7 @@ data:
   # Path to pre-computed features (from precompute_features.py)
   processed_dir: /home/spencerpkessler/scratch/data/processed/combined_data
   batch_size: 16
-  num_workers: 0
+  num_workers: 4
   train_size: 0.64
   val_size: 0.16
   test_size: 0.20
@@ -45,7 +45,7 @@ train:
   epochs: 100
   device: cuda
   grad_clip: 3.0
-  save_every: 10
+  save_every: 5
   train_metrics_max_samples: 100
 
 # MLflow configuration
